@@ -135,6 +135,7 @@ async function openNote(id) {
     contentArea.value   = note.content;
     folderInput.value   = note.folder;
     renderTagChips(note.tags);
+    renderUrlBar(note.content);
     setBadge('');
     editorPanel.style.display = 'flex';
     editorPanel.style.flexDirection = 'column';
@@ -148,6 +149,7 @@ async function openNote(id) {
 function closeEditor() {
   clearTimers();
   state.currentNoteId = null;
+  urlBar.style.display = 'none';
   editorPanel.style.display = 'none';
   noteListPanel.style.display = 'flex';
   noteListPanel.style.flexDirection = 'column';
@@ -560,11 +562,29 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && state.currentNoteId) closeEditor();
 });
 
-[titleInput, contentArea, folderInput].forEach(el =>
+[titleInput, folderInput].forEach(el =>
   el.addEventListener('input', () => { state.saveDirty = true; })
 );
+contentArea.addEventListener('input', () => {
+  state.saveDirty = true;
+  renderUrlBar(contentArea.value);
+});
 
 // ── Utilities ──────────────────────────────────────────────────────────────
+
+// ── URL bar ────────────────────────────────────────────────────────────────
+
+const urlBar = $('url-bar');
+const URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
+
+function renderUrlBar(content) {
+  const matches = [...new Set(content.match(URL_RE) || [])];
+  if (!matches.length) { urlBar.style.display = 'none'; return; }
+  urlBar.style.display = 'flex';
+  urlBar.innerHTML = matches.map(u =>
+    `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer" class="url-chip">${esc(u)}</a>`
+  ).join('');
+}
 
 function clearTimers() {
   clearInterval(state.indexPollTimer);

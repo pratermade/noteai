@@ -53,33 +53,12 @@ async def lifespan(app: FastAPI):
     # Create attachment dir
     ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Write manifest.json with APP_BASE_URL baked in
-    manifest = {
-        "name": "Notes RAG",
-        "short_name": "Notes",
-        "start_url": "/",
-        "display": "standalone",
-        "background_color": "#ffffff",
-        "theme_color": "#4f46e5",
-        "icons": [
-            {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
-            {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
-        ],
-        "share_target": {
-            "action": f"{settings.app_base_url}/api/share",
-            "method": "POST",
-            "enctype": "multipart/form-data",
-            "params": {
-                "title": "title",
-                "text": "text",
-                "url": "url",
-                "files": [{"name": "file", "accept": ["application/pdf"]}],
-            },
-        },
-    }
-    manifest_path = FRONTEND_DIR / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
-    logger.info("Wrote manifest.json with APP_BASE_URL=%s", settings.app_base_url)
+    # Remove any stale static manifest.json so the dynamic /manifest.json route
+    # always wins (old Docker image layers may contain this file).
+    stale_manifest = FRONTEND_DIR / "manifest.json"
+    if stale_manifest.exists():
+        stale_manifest.unlink()
+        logger.info("Removed stale frontend/manifest.json — served dynamically")
 
     # Init DB
     async with aiosqlite.connect(settings.database_url) as conn:
@@ -114,7 +93,7 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Notes RAG", lifespan=lifespan)
+app = FastAPI(title="NoterAI", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +712,41 @@ async def health():
     overall = "ok" if all(v == "ok" for v in result.values()) else "degraded"
     result["status"] = overall
     return result
+
+
+# ---------------------------------------------------------------------------
+# manifest.json — served dynamically so APP_BASE_URL is always current
+# (must be defined before the StaticFiles mount)
+# ---------------------------------------------------------------------------
+
+@app.get("/manifest.json", include_in_schema=False)
+async def manifest():
+    return JSONResponse(
+        content={
+            "name": "NoterAI",
+            "short_name": "NoterAI",
+            "start_url": "/",
+            "display": "standalone",
+            "background_color": "#ffffff",
+            "theme_color": "#4f46e5",
+            "icons": [
+                {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+            ],
+            "share_target": {
+                "action": f"{settings.app_base_url}/api/share",
+                "method": "POST",
+                "enctype": "multipart/form-data",
+                "params": {
+                    "title": "title",
+                    "text": "text",
+                    "url": "url",
+                    "files": [{"name": "file", "accept": ["application/pdf"]}],
+                },
+            },
+        },
+        media_type="application/manifest+json",
+    )
 
 
 # ---------------------------------------------------------------------------

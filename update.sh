@@ -6,7 +6,6 @@ CONTAINER_NAME="noterai"
 IMAGE_NAME="noterai:dev"
 DATA_VOLUME="noterai-data"
 APP_PORT="${APP_PORT:-8889}"
-APP_BASE_URL="${APP_BASE_URL:-http://localhost:$APP_PORT}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -59,6 +58,11 @@ if docker inspect "$CONTAINER_NAME" > /dev/null 2>&1; then
 fi
 
 # ── 4. Start ────────────────────────────────────────────────────────────────
+ENV_FILE_ARG=""
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    ENV_FILE_ARG="--env-file $SCRIPT_DIR/.env"
+fi
+
 echo "==> Starting $CONTAINER_NAME on port $APP_PORT..."
 docker run -d \
     --name "$CONTAINER_NAME" \
@@ -66,7 +70,7 @@ docker run -d \
     --restart=unless-stopped \
     -v "${DATA_VOLUME}:/data" \
     -e APP_PORT="$APP_PORT" \
-    -e APP_BASE_URL="$APP_BASE_URL" \
+    $ENV_FILE_ARG \
     "$IMAGE_NAME"
 
 echo "==> Waiting for app to be ready..."

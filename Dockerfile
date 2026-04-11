@@ -32,8 +32,7 @@ ENV DATABASE_URL=/data/notes.db \
     EMBEDDING_BATCH_SIZE=32 \
     CHUNK_SIZE=350 \
     CHUNK_OVERLAP=40 \
-    APP_PORT=8889 \
-    APP_BASE_URL=http://localhost:8889
+    APP_PORT=8889
 
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
