@@ -1,0 +1,742 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import shutil
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Annotated
+
+import aiofiles
+import aiosqlite
+from fastapi import (
+    BackgroundTasks, Depends, FastAPI, File, Form, HTTPException,
+    Query, Request, UploadFile, status,
+)
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+
+from .config import settings
+from . import database as db
+from . import embeddings, vector_store
+from .chunker import chunk_text
+from .models import (
+    AttachmentResponse, NoteCreate, NoteResponse, NoteUpdate,
+    ReindexJob, SearchRequest, SearchResult,
+)
+from .pdf_extractor import ExtractionError as PDFExtractionError, extract as pdf_extract
+from .web_extractor import ExtractionError as WebExtractionError, extract_url
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# In-memory state
+# ---------------------------------------------------------------------------
+
+_pending_share: dict[str, dict] = {}  # token -> {note_id, expires_at}
+_reindex_jobs: dict[str, ReindexJob] = {}
+_latest_job_id: str | None = None
+
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+ATTACHMENT_DIR = Path(settings.attachment_dir)
+
+
+# ---------------------------------------------------------------------------
+# Startup / lifespan
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Create attachment dir
+    ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Write manifest.json with APP_BASE_URL baked in
+    manifest = {
+        "name": "Notes RAG",
+        "short_name": "Notes",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#ffffff",
+        "theme_color": "#4f46e5",
+        "icons": [
+            {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+        ],
+        "share_target": {
+            "action": f"{settings.app_base_url}/api/share",
+            "method": "POST",
+            "enctype": "multipart/form-data",
+            "params": {
+                "title": "title",
+                "text": "text",
+                "url": "url",
+                "files": [{"name": "file", "accept": ["application/pdf"]}],
+            },
+        },
+    }
+    manifest_path = FRONTEND_DIR / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    logger.info("Wrote manifest.json with APP_BASE_URL=%s", settings.app_base_url)
+
+    # Init DB
+    async with aiosqlite.connect(settings.database_url) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await db.init_db(conn)
+    logger.info("SQLite initialised at %s", settings.database_url)
+
+    # Check ChromaDB
+    try:
+        await vector_store.get_collection()
+        logger.info(
+            "ChromaDB connected at %s:%s, collection=%s",
+            settings.chroma_host, settings.chroma_port, settings.chroma_collection,
+        )
+    except Exception as exc:
+        logger.warning("ChromaDB not reachable at startup: %s", exc)
+
+    # Check embedding endpoint
+    try:
+        await embeddings.embed_texts(["ping"])
+        logger.info("Embedding endpoint reachable at %s", settings.embedding_base_url)
+    except Exception as exc:
+        logger.warning("Embedding endpoint not reachable at startup: %s", exc)
+
+    yield
+
+    await embeddings.close_client()
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="Notes RAG", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# DB dependency
+# ---------------------------------------------------------------------------
+
+async def get_db():
+    conn = await db.get_db()
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
+
+DB = Annotated[aiosqlite.Connection, Depends(get_db)]
+
+
+# ---------------------------------------------------------------------------
+# Indexing pipelines
+# ---------------------------------------------------------------------------
+
+async def _index_note(note_id: str, title: str, content: str,
+                      tags: list[str], folder: str) -> None:
+    if not content.strip():
+        return
+    try:
+        chunks = chunk_text(content)
+        if not chunks:
+            return
+        texts = [c["text"] for c in chunks]
+        embs = await embeddings.embed_texts(texts)
+        ids = [f"{note_id}_{c['chunk_index']}" for c in chunks]
+        metas = [
+            {
+                "note_id": note_id,
+                "chunk_index": c["chunk_index"],
+                "title": title,
+                "tags": json.dumps(tags),
+                "folder": folder,
+                "source_type": "note",
+                "source_label": title,
+            }
+            for c in chunks
+        ]
+        await vector_store.upsert(texts, embs, metas, ids)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await db.set_note_indexed(conn, note_id)
+    except Exception as exc:
+        logger.warning("Failed to index note %s: %s", note_id, exc)
+
+
+async def _index_attachment(att_id: str, note_id: str, text: str,
+                             source_label: str, source_url: str | None = None) -> None:
+    try:
+        chunks = chunk_text(text)
+        if not chunks:
+            return
+        texts = [c["text"] for c in chunks]
+        embs = await embeddings.embed_texts(texts)
+        ids = [f"{att_id}_c{c['chunk_index']}" for c in chunks]
+        metas = [
+            {
+                "note_id": note_id,
+                "attachment_id": att_id,
+                "chunk_index": c["chunk_index"],
+                "source_type": "attachment",
+                "source_label": source_label,
+                "source_url": source_url or "",
+            }
+            for c in chunks
+        ]
+        await vector_store.upsert(texts, embs, metas, ids)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await db.update_attachment(conn, att_id, indexed_at=_now())
+    except Exception as exc:
+        logger.warning("Failed to index attachment %s: %s", att_id, exc)
+
+
+async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
+                         original_filename: str) -> None:
+    try:
+        result = await pdf_extract(stored_path)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await db.update_attachment(
+                conn, att_id,
+                page_count=result.page_count,
+                extracted_at=_now(),
+                extracted_text=result.text,
+            )
+        await _index_attachment(att_id, note_id, result.text, original_filename)
+    except PDFExtractionError as exc:
+        logger.warning("PDF extraction failed for %s: %s", att_id, exc)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await db.update_attachment(conn, att_id, extraction_error=str(exc))
+    except Exception as exc:
+        logger.warning("Unexpected error in PDF pipeline for %s: %s", att_id, exc)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await db.update_attachment(conn, att_id, extraction_error=str(exc))
+
+
+async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
+    try:
+        result = await extract_url(url)
+        label = result.title or _hostname(url)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await db.update_attachment(
+                conn, att_id,
+                filename=label,
+                extracted_text=result.text,
+                extracted_at=_now(),
+                size_bytes=result.char_count,
+            )
+        await _index_attachment(att_id, note_id, result.text, label, source_url=url)
+    except WebExtractionError as exc:
+        logger.warning("Web extraction failed for %s: %s", att_id, exc)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await db.update_attachment(conn, att_id, extraction_error=str(exc))
+    except Exception as exc:
+        logger.warning("Unexpected error in web pipeline for %s: %s", att_id, exc)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await db.update_attachment(conn, att_id, extraction_error=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _hostname(url: str) -> str:
+    from urllib.parse import urlparse
+    return urlparse(url).hostname or url
+
+
+def _purge_expired_shares() -> None:
+    now = datetime.now(timezone.utc)
+    expired = [t for t, v in _pending_share.items() if v["expires_at"] < now]
+    for t in expired:
+        del _pending_share[t]
+
+
+# ---------------------------------------------------------------------------
+# Notes CRUD
+# ---------------------------------------------------------------------------
+
+@app.get("/api/notes", response_model=list[NoteResponse])
+async def list_notes(
+    conn: DB,
+    tag: str | None = Query(default=None),
+    folder: str | None = Query(default=None),
+):
+    return await db.list_notes(conn, tag=tag, folder=folder)
+
+
+@app.get("/api/notes/{note_id}", response_model=NoteResponse)
+async def get_note(note_id: str, conn: DB):
+    note = await db.get_note(conn, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return note
+
+
+@app.post("/api/notes", response_model=NoteResponse, status_code=201)
+async def create_note(body: NoteCreate, conn: DB, background_tasks: BackgroundTasks):
+    note = await db.create_note(conn, body.title, body.content, body.tags, body.folder)
+    background_tasks.add_task(
+        _index_note, note.id, note.title, note.content, note.tags, note.folder
+    )
+    return note
+
+
+@app.put("/api/notes/{note_id}", response_model=NoteResponse)
+async def update_note(note_id: str, body: NoteUpdate, conn: DB,
+                      background_tasks: BackgroundTasks):
+    existing = await db.get_note(conn, note_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Note not found")
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    note = await db.update_note(conn, note_id, **fields)
+    # Clear indexed_at and re-index
+    await db.clear_note_indexed(conn, note_id)
+    try:
+        await vector_store.delete_by_note_id(note_id)
+    except Exception as exc:
+        logger.warning("Could not delete old vectors for note %s: %s", note_id, exc)
+    background_tasks.add_task(
+        _index_note, note.id, note.title, note.content, note.tags, note.folder
+    )
+    return note
+
+
+@app.delete("/api/notes/{note_id}", status_code=204)
+async def delete_note(note_id: str, conn: DB):
+    note = await db.get_note(conn, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    # Delete attachment files
+    atts = await db.list_attachments(conn, note_id)
+    for att in atts:
+        if att.stored_path:
+            path = ATTACHMENT_DIR / att.stored_path
+            if path.exists():
+                path.unlink(missing_ok=True)
+        try:
+            await vector_store.delete_by_attachment_id(att.id)
+        except Exception:
+            pass
+    # Clean up note dir
+    note_dir = ATTACHMENT_DIR / note_id
+    if note_dir.exists():
+        shutil.rmtree(note_dir, ignore_errors=True)
+    try:
+        await vector_store.delete_by_note_id(note_id)
+    except Exception as exc:
+        logger.warning("Could not delete vectors for note %s: %s", note_id, exc)
+    await db.delete_note(conn, note_id)
+
+
+# ---------------------------------------------------------------------------
+# Tags & Folders
+# ---------------------------------------------------------------------------
+
+@app.get("/api/tags")
+async def list_tags(conn: DB):
+    return await db.list_tags(conn)
+
+
+@app.get("/api/folders")
+async def list_folders(conn: DB):
+    return await db.list_folders(conn)
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+@app.post("/api/search", response_model=list[SearchResult])
+async def search(body: SearchRequest, conn: DB):
+    try:
+        emb = await embeddings.embed_texts([body.query])
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Embedding service unavailable: {exc}")
+
+    where: dict | None = None
+    conditions = []
+    if body.tags:
+        # Chroma $in operator for any matching tag (stored as JSON string)
+        # We search per-tag and merge, or use a simpler approach
+        conditions.append({"$or": [{"tags": {"$contains": t}} for t in body.tags]})
+    if body.folder:
+        conditions.append({"folder": {"$eq": body.folder}})
+
+    if len(conditions) == 1:
+        where = conditions[0]
+    elif len(conditions) > 1:
+        where = {"$and": conditions}
+
+    try:
+        raw = await vector_store.query(emb[0], body.n_results, where)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Vector store unavailable: {exc}")
+
+    results: list[SearchResult] = []
+    for item in raw:
+        meta = item["metadata"]
+        note_id = meta.get("note_id", "")
+        note = await db.get_note(conn, note_id)
+        if not note:
+            continue
+        # cosine distance → similarity score
+        score = 1.0 - item["distance"]
+        results.append(SearchResult(
+            note_id=note_id,
+            title=note.title,
+            folder=note.folder,
+            tags=note.tags,
+            score=round(score, 4),
+            chunk_text=item["document"],
+            source_type=meta.get("source_type", "note"),
+            source_label=meta.get("source_label", note.title),
+            source_url=meta.get("source_url") or None,
+            attachment_id=meta.get("attachment_id") or None,
+        ))
+
+    results.sort(key=lambda r: r.score, reverse=True)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Attachments
+# ---------------------------------------------------------------------------
+
+@app.post("/api/notes/{note_id}/attachments", response_model=AttachmentResponse,
+          status_code=202)
+async def upload_attachment(
+    note_id: str,
+    conn: DB,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+):
+    note = await db.get_note(conn, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=415, detail="Only PDF files are accepted")
+
+    MAX_SIZE = 50 * 1024 * 1024
+    contents = await file.read(MAX_SIZE + 1)
+    if len(contents) > MAX_SIZE:
+        raise HTTPException(status_code=413, detail="File exceeds 50 MB limit")
+
+    att_id = str(uuid.uuid4())
+    note_dir = ATTACHMENT_DIR / note_id
+    note_dir.mkdir(parents=True, exist_ok=True)
+    stored_filename = f"{att_id}.pdf"
+    stored_path = Path(note_id) / stored_filename
+    full_path = ATTACHMENT_DIR / stored_path
+
+    async with aiofiles.open(full_path, "wb") as f:
+        await f.write(contents)
+
+    original_filename = file.filename or "attachment.pdf"
+    att = await db.create_attachment(
+        conn,
+        note_id=note_id,
+        filename=original_filename,
+        mime_type="application/pdf",
+        size_bytes=len(contents),
+        stored_path=str(stored_path),
+    )
+    background_tasks.add_task(
+        _pdf_pipeline, att.id, note_id, str(full_path), original_filename
+    )
+    return att
+
+
+@app.get("/api/notes/{note_id}/attachments", response_model=list[AttachmentResponse])
+async def list_attachments(note_id: str, conn: DB):
+    note = await db.get_note(conn, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return await db.list_attachments(conn, note_id)
+
+
+@app.get("/api/attachments/{att_id}/download")
+async def download_attachment(att_id: str, conn: DB):
+    att = await db.get_attachment(conn, att_id)
+    if not att or not att.stored_path:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    full_path = ATTACHMENT_DIR / att.stored_path
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    return FileResponse(
+        path=str(full_path),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{att.filename}"'},
+    )
+
+
+@app.delete("/api/attachments/{att_id}", status_code=204)
+async def delete_attachment(att_id: str, conn: DB):
+    att = await db.get_attachment(conn, att_id)
+    if not att:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    if att.stored_path:
+        full_path = ATTACHMENT_DIR / att.stored_path
+        full_path.unlink(missing_ok=True)
+    try:
+        await vector_store.delete_by_attachment_id(att_id)
+    except Exception as exc:
+        logger.warning("Could not delete vectors for attachment %s: %s", att_id, exc)
+    await db.delete_attachment(conn, att_id)
+
+
+# ---------------------------------------------------------------------------
+# Reindex
+# ---------------------------------------------------------------------------
+
+@app.post("/api/notes/{note_id}/reindex", response_model=NoteResponse)
+async def reindex_note(note_id: str, conn: DB):
+    note = await db.get_note(conn, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    await db.clear_note_indexed(conn, note_id)
+    try:
+        await vector_store.delete_by_note_id(note_id)
+    except Exception as exc:
+        logger.warning("Could not delete old vectors: %s", exc)
+    await _index_note(note.id, note.title, note.content, note.tags, note.folder)
+    return await db.get_note(conn, note_id)
+
+
+@app.post("/api/reindex", response_model=ReindexJob)
+async def bulk_reindex(
+    conn: DB,
+    background_tasks: BackgroundTasks,
+    folder: str | None = None,
+    tag: str | None = None,
+):
+    notes = await db.list_notes(conn, tag=tag, folder=folder)
+    job_id = str(uuid.uuid4())
+    job = ReindexJob(
+        job_id=job_id,
+        status="running",
+        total=len(notes),
+        completed=0,
+        failed=0,
+        started_at=_now(),
+    )
+    _reindex_jobs[job_id] = job
+    global _latest_job_id
+    _latest_job_id = job_id
+
+    note_snapshots = [
+        (n.id, n.title, n.content, n.tags, n.folder) for n in notes
+    ]
+
+    background_tasks.add_task(_bulk_reindex_task, job_id, note_snapshots)
+    return job
+
+
+async def _bulk_reindex_task(job_id: str, notes: list[tuple]) -> None:
+    job = _reindex_jobs[job_id]
+    for note_id, title, content, tags, folder in notes:
+        try:
+            async with aiosqlite.connect(settings.database_url) as conn:
+                conn.row_factory = aiosqlite.Row
+                await conn.execute("PRAGMA foreign_keys = ON")
+                await db.clear_note_indexed(conn, note_id)
+            try:
+                await vector_store.delete_by_note_id(note_id)
+            except Exception:
+                pass
+            await _index_note(note_id, title, content, tags, folder)
+
+            # Re-index attachments
+            async with aiosqlite.connect(settings.database_url) as conn:
+                conn.row_factory = aiosqlite.Row
+                await conn.execute("PRAGMA foreign_keys = ON")
+                atts = await db.list_indexed_attachments(conn, note_id)
+
+            for att in atts:
+                try:
+                    await vector_store.delete_by_attachment_id(att.id)
+                    if att.mime_type == "application/pdf" and att.stored_path:
+                        full_path = str(ATTACHMENT_DIR / att.stored_path)
+                        await _pdf_pipeline(att.id, note_id, full_path, att.filename)
+                    elif att.mime_type == "text/html" and att.source_url:
+                        await _web_pipeline(att.id, note_id, att.source_url)
+                    job.attachments_completed += 1
+                except Exception as exc:
+                    logger.warning("Attachment reindex failed %s: %s", att.id, exc)
+                    job.attachments_failed += 1
+
+            job.completed += 1
+        except Exception as exc:
+            logger.warning("Note reindex failed %s: %s", note_id, exc)
+            job.failed += 1
+            job.errors.append({"note_id": note_id, "title": title, "error": str(exc)})
+
+    job.finished_at = _now()
+    job.status = "completed_with_errors" if job.failed else "completed"
+
+
+@app.get("/api/reindex/status", response_model=ReindexJob)
+async def reindex_status(job_id: str | None = Query(default=None)):
+    if job_id:
+        job = _reindex_jobs.get(job_id)
+    elif _latest_job_id:
+        job = _reindex_jobs.get(_latest_job_id)
+    else:
+        job = None
+    if not job:
+        raise HTTPException(status_code=404, detail="No reindex job found")
+    return job
+
+
+# ---------------------------------------------------------------------------
+# Share target
+# ---------------------------------------------------------------------------
+
+@app.post("/api/share")
+async def share(
+    background_tasks: BackgroundTasks,
+    title: str = Form(default=""),
+    text: str = Form(default=""),
+    url: str = Form(default=""),
+    file: UploadFile | None = File(default=None),
+):
+    token = str(uuid.uuid4())[:8]
+    expires = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    async with aiosqlite.connect(settings.database_url) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA foreign_keys = ON")
+
+        if file and file.filename:
+            # Case 1: PDF file
+            stem = Path(file.filename).stem.replace("_", " ").replace("-", " ")
+            note = await db.create_note(conn, stem, "", [], "shared")
+            contents = await file.read()
+            att_id = str(uuid.uuid4())
+            note_dir = ATTACHMENT_DIR / note.id
+            note_dir.mkdir(parents=True, exist_ok=True)
+            stored_filename = f"{att_id}.pdf"
+            stored_path = Path(note.id) / stored_filename
+            full_path = ATTACHMENT_DIR / stored_path
+            async with aiofiles.open(full_path, "wb") as f:
+                await f.write(contents)
+            att = await db.create_attachment(
+                conn,
+                note_id=note.id,
+                filename=file.filename,
+                mime_type="application/pdf",
+                size_bytes=len(contents),
+                stored_path=str(stored_path),
+            )
+            background_tasks.add_task(
+                _pdf_pipeline, att.id, note.id, str(full_path), file.filename
+            )
+        elif url:
+            # Case 2: URL share
+            hostname = _hostname(url)
+            note_title = title.strip() or hostname
+            note = await db.create_note(conn, note_title, url, [], "shared")
+            att = await db.create_attachment(
+                conn,
+                note_id=note.id,
+                filename=hostname,
+                mime_type="text/html",
+                size_bytes=0,
+                source_url=url,
+            )
+            background_tasks.add_task(_web_pipeline, att.id, note.id, url)
+        else:
+            # Case 3: text only
+            note_title = title[:80].strip() or "Shared note"
+            note = await db.create_note(conn, note_title, text, [], "shared")
+            background_tasks.add_task(
+                _index_note, note.id, note.title, note.content, note.tags, note.folder
+            )
+
+    _purge_expired_shares()
+    _pending_share[token] = {"note_id": note.id, "expires_at": expires}
+
+    return RedirectResponse(
+        url=f"/share-handler?token={token}", status_code=302
+    )
+
+
+@app.get("/api/share/pending")
+async def share_pending(token: str = Query(...)):
+    _purge_expired_shares()
+    entry = _pending_share.get(token)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Token not found or expired")
+    note_id = entry["note_id"]
+    del _pending_share[token]
+    return {"note_id": note_id, "status": "ready"}
+
+
+@app.get("/share-handler")
+async def share_handler():
+    return FileResponse(str(FRONTEND_DIR / "share.html"))
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health():
+    result: dict = {}
+
+    # SQLite
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            await conn.execute("SELECT 1")
+        result["sqlite"] = "ok"
+    except Exception as exc:
+        result["sqlite"] = f"error: {exc}"
+
+    # ChromaDB
+    try:
+        await vector_store.get_collection()
+        result["chroma"] = "ok"
+    except Exception as exc:
+        result["chroma"] = f"error: {exc}"
+
+    # Embedding
+    try:
+        await embeddings.embed_texts(["ping"])
+        result["embedding"] = "ok"
+    except Exception as exc:
+        result["embedding"] = f"error: {exc}"
+
+    overall = "ok" if all(v == "ok" for v in result.values()) else "degraded"
+    result["status"] = overall
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Static frontend (must be last)
+# ---------------------------------------------------------------------------
+
+app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

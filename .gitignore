@@ -1,0 +1,8 @@
+.env
+*.db
+attachments/
+chroma_data/
+__pycache__/
+*.pyc
+.venv/
+venv/

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Saving…</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: #f9fafb;
+      color: #111827;
+      text-align: center;
+      padding: 24px;
+    }
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid #e5e7eb;
+      border-top-color: #4f46e5;
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+      margin-bottom: 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    h2 { font-size: 18px; margin-bottom: 8px; }
+    p  { color: #6b7280; font-size: 14px; }
+    a  { color: #4f46e5; }
+    #error { display: none; }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner"></div>
+    <h2>Saving your note…</h2>
+    <p>This will only take a moment.</p>
+  </div>
+  <div id="error">
+    <h2>Something went wrong</h2>
+    <p>Check the <a href="/">main app</a> — your note may still have been saved.</p>
+  </div>
+  <script src="/share.js"></script>
+</body>
+</html>

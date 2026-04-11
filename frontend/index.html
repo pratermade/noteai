@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Notes RAG</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#4f46e5" />
+</head>
+<body>
+
+<!-- ── Sidebar ── -->
+<aside id="sidebar">
+  <div id="sidebar-header">
+    <h1>Notes RAG</h1>
+    <button id="btn-new-note">+ New</button>
+  </div>
+  <nav id="sidebar-nav">
+    <div class="nav-section-title">Folders</div>
+    <div id="folder-list">
+      <div class="nav-item active" data-folder="">All notes</div>
+    </div>
+    <div class="nav-section-title" style="margin-top:8px">Tags</div>
+    <div id="tag-list"></div>
+  </nav>
+  <div id="sidebar-footer">
+    <button id="reindex-all-btn">Reindex all notes</button>
+    <div id="reindex-progress" style="display:none"></div>
+  </div>
+</aside>
+
+<!-- ── Main ── -->
+<main id="main">
+
+  <!-- Note list panel -->
+  <div id="note-list-panel">
+    <div id="search-bar">
+      <input id="search-input" type="search" placeholder="Semantic search…" autocomplete="off" />
+    </div>
+    <div id="note-list">
+      <div class="empty-state">No notes yet. Create one!</div>
+    </div>
+  </div>
+
+  <!-- Editor panel (hidden until a note is selected) -->
+  <div id="editor-panel" style="display:none">
+    <div id="editor-toolbar">
+      <input id="note-title-input" type="text" placeholder="Untitled" />
+      <span id="save-badge" class="badge" style="display:none"></span>
+      <button id="btn-reindex" title="Re-index this note">↻ Reindex</button>
+      <button id="btn-save">Save</button>
+    </div>
+    <div id="editor-meta">
+      <div class="meta-field">
+        <label>Folder</label>
+        <input id="folder-input" type="text" placeholder="e.g. work/projects" />
+      </div>
+      <div class="meta-field">
+        <label>Tags</label>
+        <div id="tags-container">
+          <div id="tag-chips"></div>
+          <input id="tag-input" type="text" placeholder="add tag, press Enter" />
+        </div>
+      </div>
+    </div>
+    <textarea id="note-content" placeholder="Write in markdown…"></textarea>
+
+    <!-- Attachments -->
+    <div id="attachments-section">
+      <button id="attachments-toggle">
+        <span class="arrow">▶</span> Attachments
+        <span id="att-count"></span>
+      </button>
+      <div id="attachments-body">
+        <div id="drop-zone">
+          Drop a PDF here or <u>click to choose</u>
+          <input type="file" id="file-input" accept="application/pdf" />
+        </div>
+        <div id="attachment-list"></div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script src="/app.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/service_worker.js');
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+aiosqlite
+aiofiles
+chromadb
+httpx
+tenacity
+tiktoken
+python-dotenv
+pydantic-settings
+pymupdf
+trafilatura
+python-multipart
