@@ -65,6 +65,20 @@ async def lifespan(app: FastAPI):
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA foreign_keys = ON")
         await db.init_db(conn)
+        # Backfill summaries for existing attachments that have extracted text but no summary
+        async with conn.execute(
+            "SELECT id, extracted_text FROM attachments WHERE summary IS NULL AND extracted_text IS NOT NULL"
+        ) as cur:
+            rows = await cur.fetchall()
+        if rows:
+            logger.info("Backfilling summaries for %d existing attachment(s)...", len(rows))
+            for row in rows:
+                await conn.execute(
+                    "UPDATE attachments SET summary = ? WHERE id = ?",
+                    (_make_summary(row[1]), row[0]),
+                )
+            await conn.commit()
+            logger.info("Summary backfill complete.")
     logger.info("SQLite initialised at %s", settings.database_url)
 
     # Check ChromaDB
@@ -180,6 +194,7 @@ async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
                          original_filename: str) -> None:
     try:
         result = await pdf_extract(stored_path)
+        summary = _make_summary(result.text)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
@@ -188,6 +203,7 @@ async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
                 page_count=result.page_count,
                 extracted_at=_now(),
                 extracted_text=result.text,
+                summary=summary,
             )
         await _index_attachment(att_id, note_id, result.text, original_filename)
     except PDFExtractionError as exc:
@@ -208,6 +224,7 @@ async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
     try:
         result = await extract_url(url)
         label = result.title or _hostname(url)
+        summary = _make_summary(result.text)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
@@ -215,6 +232,7 @@ async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
                 conn, att_id,
                 filename=label,
                 extracted_text=result.text,
+                summary=summary,
                 extracted_at=_now(),
                 size_bytes=result.char_count,
             )
@@ -239,6 +257,24 @@ async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _make_summary(text: str, max_chars: int = 400) -> str:
+    """Extract a short summary from the beginning of text, trimmed to a sentence boundary."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    # Prefer cutting at a sentence boundary in the second half of the window
+    for sep in (". ", ".\n", "! ", "? "):
+        pos = truncated.rfind(sep, max_chars // 2)
+        if pos != -1:
+            return truncated[: pos + 1]
+    # Fall back to word boundary
+    last_space = truncated.rfind(" ")
+    if last_space > max_chars // 2:
+        return truncated[:last_space] + "\u2026"
+    return truncated + "\u2026"
 
 
 def _hostname(url: str) -> str:
@@ -383,6 +419,12 @@ async def search(body: SearchRequest, conn: DB):
             continue
         # cosine distance → similarity score
         score = 1.0 - item["distance"]
+        att_id = meta.get("attachment_id") or None
+        att_summary: str | None = None
+        if att_id:
+            att = await db.get_attachment(conn, att_id)
+            if att:
+                att_summary = att.summary
         results.append(SearchResult(
             note_id=note_id,
             title=note.title,
@@ -393,7 +435,8 @@ async def search(body: SearchRequest, conn: DB):
             source_type=meta.get("source_type", "note"),
             source_label=meta.get("source_label", note.title),
             source_url=meta.get("source_url") or None,
-            attachment_id=meta.get("attachment_id") or None,
+            attachment_id=att_id,
+            attachment_summary=att_summary,
         ))
 
     results.sort(key=lambda r: r.score, reverse=True)

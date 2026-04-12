@@ -116,7 +116,8 @@ function renderSearchResults(results) {
         ${tagHtml}
         <span class="note-card-score">score ${r.score.toFixed(3)}</span>
       </div>
-      ${isAtt ? `<div class="note-card-meta" style="font-size:11px">📄 ${esc(r.source_label)}</div>` : ''}
+      ${isAtt ? `<div class="note-card-meta" style="font-size:11px">📄 ${esc(r.source_label)}${r.source_url ? ` · <a href="${esc(r.source_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(r.source_url)}</a>` : ''}</div>` : ''}
+      ${r.attachment_summary ? `<div class="note-card-summary">${esc(r.attachment_summary)}</div>` : ''}
       <div class="note-card-snippet">${esc(r.chunk_text)}</div>`;
     card.addEventListener('click', () => openNote(r.note_id));
     noteListEl.appendChild(card);
@@ -388,6 +389,7 @@ function renderAttRow(att) {
     <div class="att-info">
       <div class="att-name" title="${esc(att.filename)}">${esc(att.filename)}</div>
       <div class="att-meta">${sizeStr}${pages}</div>
+      ${att.summary ? `<div class="att-summary">${esc(att.summary)}</div>` : ''}
     </div>
     <span class="att-status ${status.cls}">${status.label}</span>
     <div class="att-actions">

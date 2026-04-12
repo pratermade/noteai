@@ -38,6 +38,7 @@ async def init_db(db: aiosqlite.Connection) -> None:
             size_bytes INTEGER NOT NULL DEFAULT 0,
             page_count INTEGER,
             extracted_text TEXT,
+            summary TEXT,
             extracted_at TEXT,
             indexed_at TEXT,
             extraction_error TEXT,
@@ -45,6 +46,13 @@ async def init_db(db: aiosqlite.Connection) -> None:
         )
     """)
     await db.commit()
+
+    # Migration: add summary column for databases created before this field existed
+    async with db.execute("PRAGMA table_info(attachments)") as cur:
+        cols = {row[1] for row in await cur.fetchall()}
+    if "summary" not in cols:
+        await db.execute("ALTER TABLE attachments ADD COLUMN summary TEXT")
+        await db.commit()
 
 
 def _row_to_note(row: aiosqlite.Row) -> NoteResponse:
@@ -70,6 +78,7 @@ def _row_to_attachment(row: aiosqlite.Row) -> AttachmentResponse:
         mime_type=row["mime_type"],
         size_bytes=row["size_bytes"],
         page_count=row["page_count"],
+        summary=row["summary"],
         extracted_at=row["extracted_at"],
         indexed_at=row["indexed_at"],
         extraction_error=row["extraction_error"],

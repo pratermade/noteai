@@ -38,6 +38,7 @@ class AttachmentResponse(BaseModel):
     mime_type: str
     size_bytes: int
     page_count: int | None
+    summary: str | None
     extracted_at: str | None
     indexed_at: str | None
     extraction_error: str | None
@@ -68,6 +69,7 @@ class SearchResult(BaseModel):
     source_label: str
     source_url: str | None = None
     attachment_id: str | None = None
+    attachment_summary: str | None = None
 
 
 class ReindexJob(BaseModel):
