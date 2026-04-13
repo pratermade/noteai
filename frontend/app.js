@@ -13,7 +13,10 @@ let state = {
   attPollTimer: null,
   reindexPollTimer: null,
   saveDirty: false,
+  editMode: false,
 };
+
+marked.use({ gfm: true, breaks: true });
 
 // ── Selectors ─────────────────────────────────────────────────────────────
 
@@ -39,6 +42,8 @@ const reindexAllBtn = $('reindex-all-btn');
 const reindexProgress = $('reindex-progress');
 const sidebarEl     = $('sidebar');
 const sidebarBackdrop = $('sidebar-backdrop');
+const notePreview   = $('note-preview');
+const btnEditToggle = $('btn-edit-toggle');
 
 // ── Sidebar drawer (mobile) ────────────────────────────────────────────────
 
@@ -149,6 +154,30 @@ function renderSearchResults(results) {
 
 // ── Editor ─────────────────────────────────────────────────────────────────
 
+function renderMarkdown(content) {
+  const raw = marked.parse(content || '');
+  return DOMPurify.sanitize(raw, { ADD_ATTR: ['target', 'rel'] });
+}
+
+function setEditMode(isEdit) {
+  state.editMode = isEdit;
+  if (isEdit) {
+    notePreview.style.display = 'none';
+    contentArea.style.display = '';
+    btnEditToggle.textContent = 'Preview';
+    contentArea.focus();
+  } else {
+    notePreview.innerHTML = renderMarkdown(contentArea.value);
+    notePreview.querySelectorAll('a').forEach(a => {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    });
+    notePreview.style.display = 'block';
+    contentArea.style.display = 'none';
+    btnEditToggle.textContent = 'Edit';
+  }
+}
+
 async function openNote(id) {
   clearTimers();
   state.currentNoteId = id;
@@ -160,6 +189,7 @@ async function openNote(id) {
     folderInput.value   = note.folder;
     renderTagChips(note.tags);
     renderUrlBar(note.content);
+    setEditMode(false);
     setBadge('');
     editorPanel.style.display = 'flex';
     editorPanel.style.flexDirection = 'column';
@@ -177,6 +207,8 @@ async function openNote(id) {
 function closeEditor() {
   clearTimers();
   state.currentNoteId = null;
+  state.editMode = false;
+  notePreview.innerHTML = '';
   urlBar.style.display = 'none';
   editorPanel.style.display = 'none';
   noteListPanel.style.display = 'flex';
@@ -249,6 +281,7 @@ async function saveNote() {
     }
     state.saveDirty = false;
     setBadge('saved');
+    setEditMode(false);
     startIndexPoll(state.currentNoteId);
     await loadNotes();
     await loadSidebar();
@@ -660,19 +693,26 @@ $('btn-new-note').addEventListener('click', () => {
   setBadge('');
   attList.innerHTML = '';
   $('att-count').textContent = '';
+  notePreview.innerHTML = '';
   editorPanel.style.display = 'flex';
   editorPanel.style.flexDirection = 'column';
   noteListPanel.style.display = 'none';
   closeSidebar();
+  setEditMode(true);
   titleInput.focus();
 });
 
 $('btn-save').addEventListener('click', saveNote);
 $('btn-home').addEventListener('click', closeEditor);
+notePreview.addEventListener('click', () => setEditMode(true));
+btnEditToggle.addEventListener('click', () => setEditMode(!state.editMode));
 
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveNote(); }
-  if (e.key === 'Escape' && state.currentNoteId) closeEditor();
+  if (e.key === 'Escape') {
+    if (state.editMode) setEditMode(false);
+    else if (state.currentNoteId) closeEditor();
+  }
 });
 
 [titleInput, folderInput].forEach(el =>

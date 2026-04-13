@@ -54,6 +54,7 @@
       <button id="btn-home" title="Back to notes">⌂</button>
       <input id="note-title-input" type="text" placeholder="Untitled" />
       <span id="save-badge" class="badge" style="display:none"></span>
+      <button id="btn-edit-toggle" title="Toggle edit/preview">Edit</button>
       <button id="btn-reindex" title="Re-index this note">↻ Reindex</button>
       <button id="btn-delete" title="Delete note">Delete</button>
       <button id="btn-save">Save</button>
@@ -72,6 +73,7 @@
       </div>
     </div>
     <div id="url-bar" style="display:none"></div>
+    <div id="note-preview"></div>
     <textarea id="note-content" placeholder="Write in markdown…"></textarea>
 
     <!-- Attachments -->
@@ -95,6 +97,8 @@
 <!-- Toast container -->
 <div id="toast-container"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <script src="/app.js"></script>
 <script>
   if ('serviceWorker' in navigator) {
