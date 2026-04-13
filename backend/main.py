@@ -284,7 +284,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _truncate_summary(text: str, max_chars: int = 400) -> str:
+def _truncate_summary(text: str, max_chars: int = 200) -> str:
     """Fallback: extract a short summary by truncating to a sentence boundary."""
     text = text.strip()
     if len(text) <= max_chars:
@@ -325,11 +325,11 @@ async def _llm_summary(text: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": "Summarize the following content in 150 words or fewer. Be concise and factual.",
+                "content": "Summarize the following content in 50 words or fewer. Be concise and factual.",
             },
             {"role": "user", "content": text[:8000]},
         ],
-        "max_tokens": 250,
+        "max_tokens": 80,
     }
     try:
         client = _get_summary_client()
@@ -632,7 +632,7 @@ async def delete_attachment(att_id: str, conn: DB):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/notes/{note_id}/reindex", response_model=NoteResponse)
-async def reindex_note(note_id: str, conn: DB):
+async def reindex_note(note_id: str, conn: DB, background_tasks: BackgroundTasks):
     note = await db.get_note(conn, note_id)
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -641,6 +641,23 @@ async def reindex_note(note_id: str, conn: DB):
         await vector_store.delete_by_note_id(note_id)
     except Exception as exc:
         logger.warning("Could not delete old vectors: %s", exc)
+
+    # Derive and set note_type from existing attachments synchronously so the
+    # returned note has the correct type before the frontend poll re-fetches it.
+    atts = await db.list_attachments(conn, note_id)
+    if atts:
+        if any(a.mime_type == "application/pdf" for a in atts):
+            await db.set_note_type(conn, note_id, 'attachment')
+        elif any(a.mime_type == "text/html" for a in atts):
+            await db.set_note_type(conn, note_id, 'url')
+        for att in atts:
+            if att.mime_type == "application/pdf" and att.stored_path:
+                background_tasks.add_task(
+                    _pdf_pipeline, att.id, note_id, str(ATTACHMENT_DIR / att.stored_path), att.filename
+                )
+            elif att.mime_type == "text/html" and att.source_url:
+                background_tasks.add_task(_web_pipeline, att.id, note_id, att.source_url)
+
     await _index_note(note.id, note.title, note.content, note.tags, note.folder)
     return await db.get_note(conn, note_id)
 
