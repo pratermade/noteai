@@ -11,3 +11,4 @@ pydantic-settings
 pymupdf
 trafilatura
 python-multipart
+python-json-logger

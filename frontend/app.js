@@ -37,6 +37,26 @@ const attBody       = $('attachments-body');
 const attToggle     = $('attachments-toggle');
 const reindexAllBtn = $('reindex-all-btn');
 const reindexProgress = $('reindex-progress');
+const sidebarEl     = $('sidebar');
+const sidebarBackdrop = $('sidebar-backdrop');
+
+// ── Sidebar drawer (mobile) ────────────────────────────────────────────────
+
+function openSidebar() {
+  sidebarEl.classList.add('open');
+  sidebarBackdrop.classList.add('open');
+}
+
+function closeSidebar() {
+  sidebarEl.classList.remove('open');
+  sidebarBackdrop.classList.remove('open');
+}
+
+document.querySelectorAll('.btn-hamburger').forEach(btn => {
+  btn.addEventListener('click', openSidebar);
+});
+
+sidebarBackdrop.addEventListener('click', closeSidebar);
 
 // ── Toast ──────────────────────────────────────────────────────────────────
 
@@ -70,7 +90,10 @@ async function loadNotes() {
   try {
     state.notes = await apiFetch(`/api/notes?${params}`);
     renderNoteList(state.notes);
-  } catch (e) { toast('Failed to load notes: ' + e.message, 'error'); }
+  } catch (e) {
+    console.error('loadNotes', e);
+    toast('Failed to load notes: ' + e.message, 'error');
+  }
 }
 
 function renderNoteList(notes) {
@@ -141,10 +164,14 @@ async function openNote(id) {
     editorPanel.style.display = 'flex';
     editorPanel.style.flexDirection = 'column';
     noteListPanel.style.display = 'none';
+    closeSidebar();
     highlightActiveCard(id);
     await loadAttachments(id);
     if (!note.indexed_at) startIndexPoll(id);
-  } catch (e) { toast('Could not open note: ' + e.message, 'error'); }
+  } catch (e) {
+    console.error('openNote', e);
+    toast('Could not open note: ' + e.message, 'error');
+  }
 }
 
 function closeEditor() {
@@ -226,6 +253,7 @@ async function saveNote() {
     await loadNotes();
     await loadSidebar();
   } catch (e) {
+    console.error('saveNote', e);
     setBadge('error');
     toast('Save failed: ' + e.message, 'error');
   }
@@ -246,16 +274,25 @@ function startIndexPoll(noteId) {
   clearInterval(state.indexPollTimer);
   setBadge('saved');
   let attempts = 0;
+  let failures = 0;
   state.indexPollTimer = setInterval(async () => {
     attempts++;
     try {
       const note = await apiFetch(`/api/notes/${noteId}`);
+      failures = 0;
       if (note.indexed_at) {
         setBadge('indexed');
         clearInterval(state.indexPollTimer);
         renderNoteList(state.notes.map(n => n.id === noteId ? note : n));
       }
-    } catch {}
+    } catch (err) {
+      console.warn('index poll failed', err);
+      failures++;
+      if (failures >= 3) {
+        clearInterval(state.indexPollTimer);
+        toast('Could not reach server — please reload.', 'error');
+      }
+    }
     if (attempts > 60) clearInterval(state.indexPollTimer);
   }, 2000);
 }
@@ -264,15 +301,35 @@ function startIndexPoll(noteId) {
 
 async function deleteCurrentNote() {
   if (!state.currentNoteId) return;
-  if (!confirm('Delete this note and all its attachments?')) return;
   try {
     await apiFetch(`/api/notes/${state.currentNoteId}`, { method: 'DELETE' });
     closeEditor();
     await loadNotes();
     await loadSidebar();
     toast('Note deleted.', 'success');
-  } catch (e) { toast('Delete failed: ' + e.message, 'error'); }
+  } catch (e) {
+    console.error('deleteCurrentNote', e);
+    toast('Delete failed: ' + e.message, 'error');
+  }
 }
+
+const deleteBtn = $('btn-delete');
+deleteBtn.addEventListener('click', () => {
+  if (deleteBtn.dataset.confirm === '1') {
+    deleteBtn.dataset.confirm = '';
+    deleteBtn.textContent = 'Delete';
+    deleteCurrentNote();
+  } else {
+    deleteBtn.dataset.confirm = '1';
+    deleteBtn.textContent = 'Sure?';
+    setTimeout(() => {
+      if (deleteBtn.dataset.confirm === '1') {
+        deleteBtn.dataset.confirm = '';
+        deleteBtn.textContent = 'Delete';
+      }
+    }, 5000);
+  }
+});
 
 // ── Sidebar ────────────────────────────────────────────────────────────────
 
@@ -285,7 +342,9 @@ async function loadSidebar() {
     state.tags    = tags;
     state.folders = folders;
     renderSidebar();
-  } catch {}
+  } catch (e) {
+    console.error('loadSidebar', e);
+  }
 }
 
 function renderSidebar() {
@@ -294,14 +353,14 @@ function renderSidebar() {
   const allItem = document.createElement('div');
   allItem.className = 'nav-item' + (state.filterFolder === null && !state.filterTag ? ' active' : '');
   allItem.textContent = 'All notes';
-  allItem.addEventListener('click', () => setFilter(null, null));
+  allItem.addEventListener('click', () => { setFilter(null, null); closeSidebar(); });
   folderList.appendChild(allItem);
 
   for (const f of state.folders) {
     const item = document.createElement('div');
     item.className = 'nav-item' + (state.filterFolder === f ? ' active' : '');
     item.textContent = '📁 ' + f;
-    item.addEventListener('click', () => setFilter(null, f));
+    item.addEventListener('click', () => { setFilter(null, f); closeSidebar(); });
     folderList.appendChild(item);
   }
 
@@ -311,7 +370,7 @@ function renderSidebar() {
     const item = document.createElement('div');
     item.className = 'nav-item' + (state.filterTag === t ? ' active' : '');
     item.innerHTML = `<span class="tag-chip">${esc(t)}</span>`;
-    item.addEventListener('click', () => setFilter(t, null));
+    item.addEventListener('click', () => { setFilter(t, null); closeSidebar(); });
     tagListEl.appendChild(item);
   }
 }
@@ -353,6 +412,7 @@ async function runSearch(q) {
     });
     renderSearchResults(results);
   } catch (e) {
+    console.error('runSearch', e);
     toast('Search error: ' + e.message, 'error');
   }
 }
@@ -368,7 +428,9 @@ async function loadAttachments(noteId) {
     const hasPending = atts.some(a => !a.indexed_at);
     if (hasPending) startAttPoll(noteId);
     else clearInterval(state.attPollTimer);
-  } catch {}
+  } catch (e) {
+    console.error('loadAttachments', e);
+  }
 }
 
 function renderAttachments(atts) {
@@ -410,9 +472,20 @@ function attStatus(att) {
 function startAttPoll(noteId) {
   clearInterval(state.attPollTimer);
   let attempts = 0;
+  let failures = 0;
   state.attPollTimer = setInterval(async () => {
     attempts++;
-    await loadAttachments(noteId);
+    try {
+      await loadAttachments(noteId);
+      failures = 0;
+    } catch (err) {
+      console.warn('attachment poll failed', err);
+      failures++;
+      if (failures >= 3) {
+        clearInterval(state.attPollTimer);
+        toast('Could not reach server — please reload.', 'error');
+      }
+    }
     if (attempts > 90) clearInterval(state.attPollTimer);
   }, 2000);
 }
@@ -421,12 +494,34 @@ async function downloadAtt(attId) {
   window.location.href = `/api/attachments/${attId}/download`;
 }
 
+// ── Delete attachment (inline confirm) ────────────────────────────────────
+
+const _deleteAttConfirm = new Set();
+
 async function deleteAtt(attId) {
-  if (!confirm('Delete this attachment and its vectors?')) return;
+  if (!_deleteAttConfirm.has(attId)) {
+    _deleteAttConfirm.add(attId);
+    const row = document.getElementById(`att-${attId}`);
+    const btn = row?.querySelector('.att-btn.danger');
+    if (btn) {
+      btn.textContent = 'Sure?';
+      setTimeout(() => {
+        if (_deleteAttConfirm.has(attId)) {
+          _deleteAttConfirm.delete(attId);
+          btn.textContent = '✕';
+        }
+      }, 5000);
+    }
+    return;
+  }
+  _deleteAttConfirm.delete(attId);
   try {
     await apiFetch(`/api/attachments/${attId}`, { method: 'DELETE' });
     await loadAttachments(state.currentNoteId);
-  } catch (e) { toast('Delete failed: ' + e.message, 'error'); }
+  } catch (e) {
+    console.error('deleteAtt', e);
+    toast('Delete failed: ' + e.message, 'error');
+  }
 }
 
 // Drag-and-drop upload
@@ -502,6 +597,7 @@ $('btn-reindex').addEventListener('click', async () => {
     setBadge('indexed');
     toast('Note re-indexed.', 'success');
   } catch (e) {
+    console.error('reindexNote', e);
     setBadge('error');
     toast('Reindex failed: ' + e.message, 'error');
   }
@@ -512,14 +608,19 @@ reindexAllBtn.addEventListener('click', async () => {
     const job = await apiFetch('/api/reindex', { method: 'POST' });
     reindexProgress.style.display = 'block';
     pollReindexJob(job.job_id, job.total);
-  } catch (e) { toast('Reindex failed: ' + e.message, 'error'); }
+  } catch (e) {
+    console.error('reindexAll', e);
+    toast('Reindex failed: ' + e.message, 'error');
+  }
 });
 
 function pollReindexJob(jobId, total) {
   clearInterval(state.reindexPollTimer);
+  let failures = 0;
   state.reindexPollTimer = setInterval(async () => {
     try {
       const job = await apiFetch(`/api/reindex/status?job_id=${jobId}`);
+      failures = 0;
       const pct = total > 0 ? Math.round(job.completed / total * 100) : 0;
       reindexProgress.innerHTML = `
         <progress value="${job.completed}" max="${total}"></progress>
@@ -535,7 +636,15 @@ function pollReindexJob(jobId, total) {
         }
         await loadNotes();
       }
-    } catch {}
+    } catch (err) {
+      console.warn('reindex poll failed', err);
+      failures++;
+      if (failures >= 3) {
+        clearInterval(state.reindexPollTimer);
+        reindexProgress.style.display = 'none';
+        toast('Could not reach server — please reload.', 'error');
+      }
+    }
   }, 3000);
 }
 
@@ -554,10 +663,12 @@ $('btn-new-note').addEventListener('click', () => {
   editorPanel.style.display = 'flex';
   editorPanel.style.flexDirection = 'column';
   noteListPanel.style.display = 'none';
+  closeSidebar();
   titleInput.focus();
 });
 
 $('btn-save').addEventListener('click', saveNote);
+$('btn-home').addEventListener('click', closeEditor);
 
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveNote(); }

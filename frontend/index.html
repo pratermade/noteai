@@ -10,6 +10,9 @@
 </head>
 <body>
 
+<!-- Mobile sidebar backdrop -->
+<div id="sidebar-backdrop"></div>
+
 <!-- ── Sidebar ── -->
 <aside id="sidebar">
   <div id="sidebar-header">
@@ -36,6 +39,7 @@
   <!-- Note list panel -->
   <div id="note-list-panel">
     <div id="search-bar">
+      <button class="btn-hamburger" aria-label="Open menu">☰</button>
       <input id="search-input" type="search" placeholder="Semantic search…" autocomplete="off" />
     </div>
     <div id="note-list">
@@ -46,9 +50,12 @@
   <!-- Editor panel (hidden until a note is selected) -->
   <div id="editor-panel" style="display:none">
     <div id="editor-toolbar">
+      <button class="btn-hamburger" aria-label="Open menu">☰</button>
+      <button id="btn-home" title="Back to notes">⌂</button>
       <input id="note-title-input" type="text" placeholder="Untitled" />
       <span id="save-badge" class="badge" style="display:none"></span>
       <button id="btn-reindex" title="Re-index this note">↻ Reindex</button>
+      <button id="btn-delete" title="Delete note">Delete</button>
       <button id="btn-save">Save</button>
     </div>
     <div id="editor-meta">

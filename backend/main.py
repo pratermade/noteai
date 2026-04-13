@@ -5,6 +5,8 @@ import logging
 import os
 import shutil
 import uuid
+
+from pythonjsonlogger import jsonlogger
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -50,6 +52,14 @@ ATTACHMENT_DIR = Path(settings.attachment_dir)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ── Logging ──
+    handler = logging.StreamHandler()
+    handler.setFormatter(jsonlogger.JsonFormatter(
+        fmt="%(asctime)s %(levelname)s %(name)s %(message)s"
+    ))
+    logging.root.setLevel(logging.INFO)
+    logging.root.handlers = [handler]
+
     # Create attachment dir
     ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -157,8 +167,8 @@ async def _index_note(note_id: str, title: str, content: str,
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
             await db.set_note_indexed(conn, note_id)
-    except Exception as exc:
-        logger.warning("Failed to index note %s: %s", note_id, exc)
+    except Exception:
+        logger.error("Failed to index note", extra={"note_id": note_id}, exc_info=True)
 
 
 async def _index_attachment(att_id: str, note_id: str, text: str,
@@ -186,8 +196,8 @@ async def _index_attachment(att_id: str, note_id: str, text: str,
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
             await db.update_attachment(conn, att_id, indexed_at=_now())
-    except Exception as exc:
-        logger.warning("Failed to index attachment %s: %s", att_id, exc)
+    except Exception:
+        logger.error("Failed to index attachment", extra={"note_id": note_id, "attachment_id": att_id}, exc_info=True)
 
 
 async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
@@ -207,13 +217,13 @@ async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
             )
         await _index_attachment(att_id, note_id, result.text, original_filename)
     except PDFExtractionError as exc:
-        logger.warning("PDF extraction failed for %s: %s", att_id, exc)
+        logger.error("PDF extraction failed", extra={"attachment_id": att_id, "note_id": note_id}, exc_info=True)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
             await db.update_attachment(conn, att_id, extraction_error=str(exc))
     except Exception as exc:
-        logger.warning("Unexpected error in PDF pipeline for %s: %s", att_id, exc)
+        logger.error("Unexpected error in PDF pipeline", extra={"attachment_id": att_id, "note_id": note_id}, exc_info=True)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
@@ -238,13 +248,13 @@ async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
             )
         await _index_attachment(att_id, note_id, result.text, label, source_url=url)
     except WebExtractionError as exc:
-        logger.warning("Web extraction failed for %s: %s", att_id, exc)
+        logger.error("Web extraction failed", extra={"attachment_id": att_id, "note_id": note_id}, exc_info=True)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
             await db.update_attachment(conn, att_id, extraction_error=str(exc))
     except Exception as exc:
-        logger.warning("Unexpected error in web pipeline for %s: %s", att_id, exc)
+        logger.error("Unexpected error in web pipeline", extra={"attachment_id": att_id, "note_id": note_id}, exc_info=True)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
@@ -354,7 +364,7 @@ async def delete_note(note_id: str, conn: DB):
         try:
             await vector_store.delete_by_attachment_id(att.id)
         except Exception:
-            pass
+            logger.warning("Could not delete vectors for attachment %s", att.id, exc_info=True)
     # Clean up note dir
     note_dir = ATTACHMENT_DIR / note_id
     if note_dir.exists():
@@ -588,7 +598,7 @@ async def _bulk_reindex_task(job_id: str, notes: list[tuple]) -> None:
             try:
                 await vector_store.delete_by_note_id(note_id)
             except Exception:
-                pass
+                logger.warning("Could not delete old vectors for note %s", note_id, exc_info=True)
             await _index_note(note_id, title, content, tags, folder)
 
             # Re-index attachments
