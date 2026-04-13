@@ -24,7 +24,9 @@ async def init_db(db: aiosqlite.Connection) -> None:
             folder TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            indexed_at TEXT
+            indexed_at TEXT,
+            note_type TEXT NOT NULL DEFAULT 'markdown',
+            note_summary TEXT
         )
     """)
     await db.execute("""
@@ -47,11 +49,20 @@ async def init_db(db: aiosqlite.Connection) -> None:
     """)
     await db.commit()
 
-    # Migration: add summary column for databases created before this field existed
+    # Migration: add columns for databases created before these fields existed
     async with db.execute("PRAGMA table_info(attachments)") as cur:
-        cols = {row[1] for row in await cur.fetchall()}
-    if "summary" not in cols:
+        att_cols = {row[1] for row in await cur.fetchall()}
+    if "summary" not in att_cols:
         await db.execute("ALTER TABLE attachments ADD COLUMN summary TEXT")
+        await db.commit()
+
+    async with db.execute("PRAGMA table_info(notes)") as cur:
+        note_cols = {row[1] for row in await cur.fetchall()}
+    if "note_type" not in note_cols:
+        await db.execute("ALTER TABLE notes ADD COLUMN note_type TEXT NOT NULL DEFAULT 'markdown'")
+    if "note_summary" not in note_cols:
+        await db.execute("ALTER TABLE notes ADD COLUMN note_summary TEXT")
+    if "note_type" not in note_cols or "note_summary" not in note_cols:
         await db.commit()
 
 
@@ -65,6 +76,8 @@ def _row_to_note(row: aiosqlite.Row) -> NoteResponse:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         indexed_at=row["indexed_at"],
+        note_type=row["note_type"],
+        note_summary=row["note_summary"],
     )
 
 
@@ -96,12 +109,13 @@ async def get_db() -> aiosqlite.Connection:
 # Notes
 
 async def create_note(db: aiosqlite.Connection, title: str, content: str,
-                      tags: list[str], folder: str) -> NoteResponse:
+                      tags: list[str], folder: str,
+                      note_type: str = 'markdown') -> NoteResponse:
     note_id = str(uuid.uuid4())
     now = _now()
     await db.execute(
-        "INSERT INTO notes (id, title, content, tags, folder, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-        (note_id, title, content, json.dumps(tags), folder, now, now),
+        "INSERT INTO notes (id, title, content, tags, folder, created_at, updated_at, note_type) VALUES (?,?,?,?,?,?,?,?)",
+        (note_id, title, content, json.dumps(tags), folder, now, now, note_type),
     )
     await db.commit()
     return await get_note(db, note_id)
@@ -159,6 +173,16 @@ async def set_note_indexed(db: aiosqlite.Connection, note_id: str) -> None:
 
 async def clear_note_indexed(db: aiosqlite.Connection, note_id: str) -> None:
     await db.execute("UPDATE notes SET indexed_at = NULL WHERE id = ?", (note_id,))
+    await db.commit()
+
+
+async def set_note_type(db: aiosqlite.Connection, note_id: str, note_type: str) -> None:
+    await db.execute("UPDATE notes SET note_type = ? WHERE id = ?", (note_type, note_id))
+    await db.commit()
+
+
+async def set_note_summary(db: aiosqlite.Connection, note_id: str, summary: str) -> None:
+    await db.execute("UPDATE notes SET note_summary = ? WHERE id = ?", (summary, note_id))
     await db.commit()
 
 

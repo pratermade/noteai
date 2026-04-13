@@ -15,6 +15,8 @@ let state = {
   saveDirty: false,
   editMode: false,
   attachmentSummaries: [],
+  currentNoteType: 'markdown',
+  currentNoteSummary: null,
 };
 
 marked.use({ gfm: true, breaks: true });
@@ -114,9 +116,11 @@ function renderNoteList(notes) {
     card.className = 'note-card' + (n.id === state.currentNoteId ? ' active' : '');
     card.dataset.id = n.id;
     const tagHtml = n.tags.map(t => `<span class="tag-chip">${esc(t)}</span>`).join('');
+    const noteType = n.note_type || 'markdown';
     card.innerHTML = `
       <div class="note-card-title">${esc(n.title || 'Untitled')}</div>
       <div class="note-card-meta">
+        <span class="note-type-badge type-${noteType}">${noteType}</span>
         ${n.folder ? `<span>📁 ${esc(n.folder)}</span>` : ''}
         ${tagHtml}
         <span>${relTime(n.updated_at)}</span>
@@ -170,17 +174,24 @@ function renderPreview() {
 }
 
 function renderSummarySection() {
-  const summaries = state.attachmentSummaries;
-  if (!summaries.length) {
+  const items = [];
+  if (state.currentNoteSummary && state.currentNoteType === 'markdown') {
+    items.push(`<div class="note-summary-item">
+       <div class="note-summary-label">Summary</div>
+       <div class="note-summary-text">${renderMarkdown(state.currentNoteSummary)}</div>
+     </div>`);
+  }
+  for (const s of state.attachmentSummaries) {
+    items.push(`<div class="note-summary-item">
+       <div class="note-summary-label">${esc(s.filename)}</div>
+       <div class="note-summary-text">${renderMarkdown(s.summary)}</div>
+     </div>`);
+  }
+  if (!items.length) {
     noteSummarySection.style.display = 'none';
     return;
   }
-  noteSummarySection.innerHTML = summaries.map(s =>
-    `<div class="note-summary-item">
-       <div class="note-summary-label">${esc(s.filename)}</div>
-       <div class="note-summary-text">${renderMarkdown(s.summary)}</div>
-     </div>`
-  ).join('');
+  noteSummarySection.innerHTML = items.join('');
   noteSummarySection.style.display = 'flex';
 }
 
@@ -210,6 +221,9 @@ async function openNote(id) {
     folderInput.value   = note.folder;
     renderTagChips(note.tags);
     state.attachmentSummaries = [];
+    state.currentNoteType = note.note_type || 'markdown';
+    state.currentNoteSummary = note.note_summary || null;
+    dropZone.style.display = '';
     renderSummarySection();
     setEditMode(false);
     setBadge('');
@@ -485,6 +499,7 @@ async function loadAttachments(noteId) {
     else clearInterval(state.attPollTimer);
     state.attachmentSummaries = atts.filter(a => a.summary).map(a => ({ filename: a.filename, summary: a.summary }));
     renderSummarySection();
+    dropZone.style.display = atts.length ? 'none' : '';
   } catch (e) {
     console.error('loadAttachments', e);
   }

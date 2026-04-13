@@ -198,6 +198,19 @@ body {
   font-size: 11px;
 }
 
+.note-type-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.type-markdown   { background: color-mix(in srgb, var(--muted) 15%, transparent); color: var(--muted); }
+.type-attachment { background: color-mix(in srgb, #f59e0b 15%, transparent); color: #b45309; }
+.type-url        { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+
 /* ── Editor ── */
 #editor-panel {
   flex: 1;

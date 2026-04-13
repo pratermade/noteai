@@ -176,6 +176,8 @@ async def _index_note(note_id: str, title: str, content: str,
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
             await db.set_note_indexed(conn, note_id)
+            summary = await _llm_summary(content)
+            await db.set_note_summary(conn, note_id, summary)
         logger.info("Indexed note %s: %d chunk(s)", note_id, len(chunks))
     except Exception:
         logger.error("Failed to index note", extra={"note_id": note_id}, exc_info=True)
@@ -226,6 +228,7 @@ async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
                 extracted_text=result.text,
                 summary=summary,
             )
+            await db.set_note_type(conn, note_id, 'attachment')
         await _index_attachment(att_id, note_id, result.text, original_filename)
     except PDFExtractionError as exc:
         logger.error("PDF extraction failed", extra={"attachment_id": att_id, "note_id": note_id}, exc_info=True)
@@ -257,6 +260,7 @@ async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
                 extracted_at=_now(),
                 size_bytes=result.char_count,
             )
+            await db.set_note_type(conn, note_id, 'url')
         await _index_attachment(att_id, note_id, result.text, label, source_url=url)
     except WebExtractionError as exc:
         logger.error("Web extraction failed", extra={"attachment_id": att_id, "note_id": note_id}, exc_info=True)
@@ -548,6 +552,10 @@ async def upload_attachment(
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
 
+    existing = await db.list_attachments(conn, note_id)
+    if existing:
+        raise HTTPException(status_code=400, detail="This note already has an attachment. Create a new note for additional content.")
+
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=415, detail="Only PDF files are accepted")
 
@@ -744,7 +752,7 @@ async def share(
         if file and file.filename:
             # Case 1: PDF file
             stem = Path(file.filename).stem.replace("_", " ").replace("-", " ")
-            note = await db.create_note(conn, stem, "", [], "shared")
+            note = await db.create_note(conn, stem, "", [], "shared", note_type='attachment')
             contents = await file.read()
             att_id = str(uuid.uuid4())
             note_dir = ATTACHMENT_DIR / note.id
@@ -769,7 +777,7 @@ async def share(
             # Case 2: URL share
             hostname = _hostname(url)
             note_title = title.strip() or hostname
-            note = await db.create_note(conn, note_title, url, [], "shared")
+            note = await db.create_note(conn, note_title, url, [], "shared", note_type='url')
             att = await db.create_attachment(
                 conn,
                 note_id=note.id,
