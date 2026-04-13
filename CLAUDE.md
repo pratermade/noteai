@@ -111,4 +111,7 @@ CHUNK_SIZE=512
 CHUNK_OVERLAP=64
 ATTACHMENT_DIR=./attachments
 APP_BASE_URL=https://localhost:8443
+SUMMARY_BASE_URL=http://localhost:11434  # OpenAI-compatible chat completions URL; omit to use truncation fallback
+SUMMARY_MODEL=gpt-4o-mini
+SUMMARY_API_KEY=                         # optional Bearer token for hosted APIs
 ```

@@ -14,6 +14,7 @@ from typing import Annotated
 
 import aiofiles
 import aiosqlite
+import httpx
 from fastapi import (
     BackgroundTasks, Depends, FastAPI, File, Form, HTTPException,
     Query, Request, UploadFile, status,
@@ -85,7 +86,7 @@ async def lifespan(app: FastAPI):
             for row in rows:
                 await conn.execute(
                     "UPDATE attachments SET summary = ? WHERE id = ?",
-                    (_make_summary(row[1]), row[0]),
+                    (_truncate_summary(row[1]), row[0]),
                 )
             await conn.commit()
             logger.info("Summary backfill complete.")
@@ -111,6 +112,8 @@ async def lifespan(app: FastAPI):
     yield
 
     await embeddings.close_client()
+    if _summary_client:
+        await _summary_client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +207,7 @@ async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
                          original_filename: str) -> None:
     try:
         result = await pdf_extract(stored_path)
-        summary = _make_summary(result.text)
+        summary = await _llm_summary(result.text)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
@@ -234,7 +237,7 @@ async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
     try:
         result = await extract_url(url)
         label = result.title or _hostname(url)
-        summary = _make_summary(result.text)
+        summary = await _llm_summary(result.text)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
@@ -269,22 +272,67 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _make_summary(text: str, max_chars: int = 400) -> str:
-    """Extract a short summary from the beginning of text, trimmed to a sentence boundary."""
+def _truncate_summary(text: str, max_chars: int = 400) -> str:
+    """Fallback: extract a short summary by truncating to a sentence boundary."""
     text = text.strip()
     if len(text) <= max_chars:
         return text
     truncated = text[:max_chars]
-    # Prefer cutting at a sentence boundary in the second half of the window
     for sep in (". ", ".\n", "! ", "? "):
         pos = truncated.rfind(sep, max_chars // 2)
         if pos != -1:
             return truncated[: pos + 1]
-    # Fall back to word boundary
     last_space = truncated.rfind(" ")
     if last_space > max_chars // 2:
         return truncated[:last_space] + "\u2026"
     return truncated + "\u2026"
+
+
+_summary_client: httpx.AsyncClient | None = None
+
+
+def _get_summary_client() -> httpx.AsyncClient:
+    global _summary_client
+    if _summary_client is None:
+        _summary_client = httpx.AsyncClient(timeout=60.0)
+    return _summary_client
+
+
+async def _llm_summary(text: str) -> str:
+    """Generate a ~150-word summary via LLM, falling back to truncation if unavailable."""
+    if not settings.summary_base_url:
+        return _truncate_summary(text)
+    headers = {"Content-Type": "application/json"}
+    if settings.summary_api_key:
+        headers["Authorization"] = f"Bearer {settings.summary_api_key}"
+    payload = {
+        "model": settings.summary_model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Summarize the following content in 150 words or fewer. Be concise and factual.",
+            },
+            {"role": "user", "content": text[:8000]},
+        ],
+        "max_tokens": 250,
+    }
+    try:
+        client = _get_summary_client()
+        resp = await client.post(
+            f"{settings.summary_base_url}/v1/chat/completions",
+            json=payload,
+            headers=headers,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "Summary LLM returned %s — falling back to truncation: %s",
+                resp.status_code, resp.text[:200],
+            )
+            return _truncate_summary(text)
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        logger.warning("Summary LLM call failed — falling back to truncation", exc_info=True)
+        return _truncate_summary(text)
 
 
 def _hostname(url: str) -> str:

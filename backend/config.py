@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     chunk_overlap: int = 64
     attachment_dir: str = "./attachments"
     app_base_url: str = "https://localhost:8443"
+    summary_base_url: str | None = None
+    summary_model: str = "gpt-4o-mini"
+    summary_api_key: str | None = None
 
     model_config = {"env_file": ".env"}
 
