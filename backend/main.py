@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -82,14 +83,8 @@ async def lifespan(app: FastAPI):
         ) as cur:
             rows = await cur.fetchall()
         if rows:
-            logger.info("Backfilling summaries for %d existing attachment(s)...", len(rows))
-            for row in rows:
-                await conn.execute(
-                    "UPDATE attachments SET summary = ? WHERE id = ?",
-                    (_truncate_summary(row[1]), row[0]),
-                )
-            await conn.commit()
-            logger.info("Summary backfill complete.")
+            logger.info("Scheduling LLM summary backfill for %d attachment(s) in background...", len(rows))
+            asyncio.create_task(_backfill_summaries([(r[0], r[1]) for r in rows]))
     logger.info("SQLite initialised at %s", settings.database_url)
 
     # Check ChromaDB
@@ -108,6 +103,17 @@ async def lifespan(app: FastAPI):
         logger.info("Embedding endpoint reachable at %s", settings.embedding_base_url)
     except Exception as exc:
         logger.warning("Embedding endpoint not reachable at startup: %s", exc)
+
+    # Check summary endpoint
+    if settings.summary_base_url:
+        try:
+            client = _get_summary_client()
+            resp = await client.get(f"{settings.summary_base_url}/v1/models", timeout=5.0)
+            logger.info("Summary endpoint reachable at %s (status %s)", settings.summary_base_url, resp.status_code)
+        except Exception as exc:
+            logger.warning("Summary endpoint not reachable at %s: %s", settings.summary_base_url, exc)
+    else:
+        logger.info("SUMMARY_BASE_URL not set — summaries will use truncation fallback")
 
     yield
 
@@ -170,6 +176,7 @@ async def _index_note(note_id: str, title: str, content: str,
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
             await db.set_note_indexed(conn, note_id)
+        logger.info("Indexed note %s: %d chunk(s)", note_id, len(chunks))
     except Exception:
         logger.error("Failed to index note", extra={"note_id": note_id}, exc_info=True)
 
@@ -199,6 +206,7 @@ async def _index_attachment(att_id: str, note_id: str, text: str,
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
             await db.update_attachment(conn, att_id, indexed_at=_now())
+        logger.info("Indexed attachment %s for note %s: %d chunk(s)", att_id, note_id, len(chunks))
     except Exception:
         logger.error("Failed to index attachment", extra={"note_id": note_id, "attachment_id": att_id}, exc_info=True)
 
@@ -301,7 +309,10 @@ def _get_summary_client() -> httpx.AsyncClient:
 async def _llm_summary(text: str) -> str:
     """Generate a ~150-word summary via LLM, falling back to truncation if unavailable."""
     if not settings.summary_base_url:
+        logger.info("No SUMMARY_BASE_URL configured — using truncation fallback")
         return _truncate_summary(text)
+    logger.info("Requesting LLM summary from %s (model=%s, text=%d chars)",
+                settings.summary_base_url, settings.summary_model, len(text))
     headers = {"Content-Type": "application/json"}
     if settings.summary_api_key:
         headers["Authorization"] = f"Bearer {settings.summary_api_key}"
@@ -329,10 +340,30 @@ async def _llm_summary(text: str) -> str:
                 resp.status_code, resp.text[:200],
             )
             return _truncate_summary(text)
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        result = resp.json()["choices"][0]["message"]["content"].strip()
+        logger.info("LLM summary generated (%d chars)", len(result))
+        return result
     except Exception:
         logger.warning("Summary LLM call failed — falling back to truncation", exc_info=True)
         return _truncate_summary(text)
+
+
+async def _backfill_summaries(rows: list[tuple[str, str]]) -> None:
+    """Generate LLM summaries for attachments that have extracted text but no summary."""
+    logger.info("Starting LLM summary backfill for %d attachment(s)...", len(rows))
+    completed = 0
+    for att_id, extracted_text in rows:
+        try:
+            summary = await _llm_summary(extracted_text)
+            async with aiosqlite.connect(settings.database_url) as conn:
+                conn.row_factory = aiosqlite.Row
+                await conn.execute("PRAGMA foreign_keys = ON")
+                await conn.execute("UPDATE attachments SET summary = ? WHERE id = ?", (summary, att_id))
+                await conn.commit()
+            completed += 1
+        except Exception:
+            logger.warning("Summary backfill failed for attachment %s", att_id, exc_info=True)
+    logger.info("Summary backfill complete: %d/%d succeeded", completed, len(rows))
 
 
 def _hostname(url: str) -> str:

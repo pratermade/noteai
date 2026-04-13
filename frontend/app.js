@@ -14,6 +14,7 @@ let state = {
   reindexPollTimer: null,
   saveDirty: false,
   editMode: false,
+  attachmentSummaries: [],
 };
 
 marked.use({ gfm: true, breaks: true });
@@ -42,8 +43,9 @@ const reindexAllBtn = $('reindex-all-btn');
 const reindexProgress = $('reindex-progress');
 const sidebarEl     = $('sidebar');
 const sidebarBackdrop = $('sidebar-backdrop');
-const notePreview   = $('note-preview');
-const btnEditToggle = $('btn-edit-toggle');
+const notePreview        = $('note-preview');
+const noteSummarySection = $('note-summary-section');
+const btnEditToggle      = $('btn-edit-toggle');
 
 // ── Sidebar drawer (mobile) ────────────────────────────────────────────────
 
@@ -159,6 +161,29 @@ function renderMarkdown(content) {
   return DOMPurify.sanitize(raw, { ADD_ATTR: ['target', 'rel'] });
 }
 
+function renderPreview() {
+  notePreview.innerHTML = renderMarkdown(contentArea.value);
+  notePreview.querySelectorAll('a').forEach(a => {
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+  });
+}
+
+function renderSummarySection() {
+  const summaries = state.attachmentSummaries;
+  if (!summaries.length) {
+    noteSummarySection.style.display = 'none';
+    return;
+  }
+  noteSummarySection.innerHTML = summaries.map(s =>
+    `<div class="note-summary-item">
+       <div class="note-summary-label">${esc(s.filename)}</div>
+       <div class="note-summary-text">${renderMarkdown(s.summary)}</div>
+     </div>`
+  ).join('');
+  noteSummarySection.style.display = 'flex';
+}
+
 function setEditMode(isEdit) {
   state.editMode = isEdit;
   if (isEdit) {
@@ -167,11 +192,7 @@ function setEditMode(isEdit) {
     btnEditToggle.textContent = 'Preview';
     contentArea.focus();
   } else {
-    notePreview.innerHTML = renderMarkdown(contentArea.value);
-    notePreview.querySelectorAll('a').forEach(a => {
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-    });
+    renderPreview();
     notePreview.style.display = 'block';
     contentArea.style.display = 'none';
     btnEditToggle.textContent = 'Edit';
@@ -188,7 +209,8 @@ async function openNote(id) {
     contentArea.value   = note.content;
     folderInput.value   = note.folder;
     renderTagChips(note.tags);
-    renderUrlBar(note.content);
+    state.attachmentSummaries = [];
+    renderSummarySection();
     setEditMode(false);
     setBadge('');
     editorPanel.style.display = 'flex';
@@ -461,6 +483,8 @@ async function loadAttachments(noteId) {
     const hasPending = atts.some(a => !a.indexed_at);
     if (hasPending) startAttPoll(noteId);
     else clearInterval(state.attPollTimer);
+    state.attachmentSummaries = atts.filter(a => a.summary).map(a => ({ filename: a.filename, summary: a.summary }));
+    renderSummarySection();
   } catch (e) {
     console.error('loadAttachments', e);
   }
@@ -720,24 +744,9 @@ document.addEventListener('keydown', e => {
 );
 contentArea.addEventListener('input', () => {
   state.saveDirty = true;
-  renderUrlBar(contentArea.value);
 });
 
 // ── Utilities ──────────────────────────────────────────────────────────────
-
-// ── URL bar ────────────────────────────────────────────────────────────────
-
-const urlBar = $('url-bar');
-const URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
-
-function renderUrlBar(content) {
-  const matches = [...new Set(content.match(URL_RE) || [])];
-  if (!matches.length) { urlBar.style.display = 'none'; return; }
-  urlBar.style.display = 'flex';
-  urlBar.innerHTML = matches.map(u =>
-    `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer" class="url-chip">${esc(u)}</a>`
-  ).join('');
-}
 
 function clearTimers() {
   clearInterval(state.indexPollTimer);
