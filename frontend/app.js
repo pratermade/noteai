@@ -732,6 +732,7 @@ $('btn-new-note').addEventListener('click', () => {
 
 $('btn-save').addEventListener('click', saveNote);
 $('btn-home').addEventListener('click', closeEditor);
+$('btn-refresh').addEventListener('click', loadNotes);
 notePreview.addEventListener('click', () => setEditMode(true));
 btnEditToggle.addEventListener('click', () => setEditMode(!state.editMode));
 

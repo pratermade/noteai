@@ -260,7 +260,8 @@ body {
 }
 #btn-save:hover { background: var(--accent-hover); }
 
-#btn-home {
+#btn-home,
+#btn-refresh {
   background: none;
   border: none;
   border-radius: var(--radius);
@@ -271,7 +272,8 @@ body {
   line-height: 1;
   flex-shrink: 0;
 }
-#btn-home:hover { color: var(--accent); background: var(--bg); }
+#btn-home:hover,
+#btn-refresh:hover { color: var(--accent); background: var(--bg); }
 
 #btn-edit-toggle {
   background: none;
@@ -761,7 +763,8 @@ progress::-moz-progress-bar { background: var(--accent); }
   #btn-reindex,
   #btn-delete,
   #btn-save,
-  #btn-home { font-size: 14px; }
+  #btn-home,
+  #btn-refresh { font-size: 14px; }
 
   /* Sidebar */
   .nav-item { font-size: 15px; }

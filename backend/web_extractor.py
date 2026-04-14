@@ -37,13 +37,13 @@ def _extract_youtube_sync(video_id: str, url: str) -> WebExtractionResult:
     from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
 
     try:
-        entries = YouTubeTranscriptApi.get_transcript(video_id)
+        transcript = YouTubeTranscriptApi().fetch(video_id)
     except TranscriptsDisabled:
         raise ExtractionError(f"Transcripts are disabled for video: {video_id}")
     except NoTranscriptFound:
         raise ExtractionError(f"No transcript found for video: {video_id}")
 
-    text = ' '.join(e['text'] for e in entries).strip()
+    text = ' '.join(s.text for s in transcript.snippets).strip()
     if len(text) < 100:
         raise ExtractionError("Transcript too short to be useful")
 
