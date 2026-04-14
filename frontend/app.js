@@ -88,6 +88,13 @@ async function apiFetch(path, opts = {}) {
   return res.json();
 }
 
+function getYouTubeVideoId(url) {
+  const m = (url || '').match(
+    /(?:youtube\.com\/watch\?.*v=|youtu\.be\/|youtube\.com\/shorts\/)([A-Za-z0-9_-]{11})/
+  );
+  return m ? m[1] : null;
+}
+
 // ── Notes list ─────────────────────────────────────────────────────────────
 
 async function loadNotes() {
@@ -221,6 +228,16 @@ async function openNote(id) {
     state.attachmentSummaries = [];
     state.currentNoteType = note.note_type || 'markdown';
     state.currentNoteSummary = note.note_summary || null;
+    const videoId = state.currentNoteType === 'video' ? getYouTubeVideoId(note.content) : null;
+    const videoEmbed = $('video-embed');
+    const videoIframe = $('video-iframe');
+    if (videoId) {
+      videoIframe.src = `https://www.youtube.com/embed/${videoId}`;
+      videoEmbed.style.display = '';
+    } else {
+      videoIframe.src = '';
+      videoEmbed.style.display = 'none';
+    }
     dropZone.style.display = '';
     renderSummarySection();
     setEditMode(false);
@@ -243,6 +260,8 @@ function closeEditor() {
   state.currentNoteId = null;
   state.editMode = false;
   notePreview.innerHTML = '';
+  $('video-iframe').src = '';
+  $('video-embed').style.display = 'none';
   urlBar.style.display = 'none';
   editorPanel.style.display = 'none';
   noteListPanel.style.display = 'flex';
