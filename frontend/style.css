@@ -356,14 +356,14 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
 }
 .note-summary-item {
   background: color-mix(in srgb, var(--accent) 6%, transparent);
   border-left: 3px solid var(--accent);
   border-radius: 4px;
   padding: 8px 12px;
-  cursor: pointer;
-  user-select: none;
 }
 .note-summary-label {
   font-size: 11px;
@@ -371,28 +371,11 @@ body {
   color: var(--accent);
   margin-bottom: 4px;
   opacity: 0.8;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.summary-toggle {
-  font-size: 10px;
-  transition: transform 0.15s;
-  opacity: 0.7;
-}
-.note-summary-item:not(.summary-collapsed) .summary-toggle {
-  transform: rotate(90deg);
 }
 .note-summary-text {
   font-size: 13px;
   color: var(--text);
   line-height: 1.5;
-}
-.note-summary-item.summary-collapsed .note-summary-text {
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
 #note-content {
