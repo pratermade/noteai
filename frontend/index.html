@@ -73,23 +73,15 @@
       </div>
     </div>
     <div id="note-summary-section" style="display:none"></div>
+    <div id="attachments-section">
+      <div id="drop-zone">
+        Drop a PDF here or <u>click to choose</u>
+        <input type="file" id="file-input" accept="application/pdf" />
+      </div>
+      <div id="attachment-list"></div>
+    </div>
     <div id="note-preview"></div>
     <textarea id="note-content" placeholder="Write in markdown…"></textarea>
-
-    <!-- Attachments -->
-    <div id="attachments-section">
-      <button id="attachments-toggle">
-        <span class="arrow">▶</span> Attachments
-        <span id="att-count"></span>
-      </button>
-      <div id="attachments-body">
-        <div id="drop-zone">
-          Drop a PDF here or <u>click to choose</u>
-          <input type="file" id="file-input" accept="application/pdf" />
-        </div>
-        <div id="attachment-list"></div>
-      </div>
-    </div>
   </div>
 
 </main>

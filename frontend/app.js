@@ -39,8 +39,6 @@ const searchInput   = $('search-input');
 const dropZone      = $('drop-zone');
 const fileInput     = $('file-input');
 const attList       = $('attachment-list');
-const attBody       = $('attachments-body');
-const attToggle     = $('attachments-toggle');
 const reindexAllBtn = $('reindex-all-btn');
 const reindexProgress = $('reindex-progress');
 const sidebarEl     = $('sidebar');
@@ -492,8 +490,6 @@ async function loadAttachments(noteId) {
   try {
     const atts = await apiFetch(`/api/notes/${noteId}/attachments`);
     renderAttachments(atts);
-    const hasCount = atts.length;
-    $('att-count').textContent = hasCount ? ` (${hasCount})` : '';
     const hasPending = atts.some(a => !a.indexed_at);
     if (hasPending) startAttPoll(noteId);
     else clearInterval(state.attPollTimer);
@@ -653,12 +649,6 @@ function uploadFile(file) {
   xhr.send(formData);
 }
 
-// Attachments toggle
-attToggle.addEventListener('click', () => {
-  attToggle.classList.toggle('open');
-  attBody.classList.toggle('open');
-});
-
 // ── Reindex ────────────────────────────────────────────────────────────────
 
 $('btn-reindex').addEventListener('click', async () => {
@@ -731,7 +721,6 @@ $('btn-new-note').addEventListener('click', () => {
   renderTagChips([]);
   setBadge('');
   attList.innerHTML = '';
-  $('att-count').textContent = '';
   notePreview.innerHTML = '';
   editorPanel.style.display = 'flex';
   editorPanel.style.flexDirection = 'column';

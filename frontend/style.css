@@ -512,32 +512,9 @@ body {
 
 /* ── Attachments ── */
 #attachments-section {
-  border-top: 1px solid var(--border);
+  padding: 8px 16px 4px;
+  border-bottom: 1px solid var(--border);
 }
-
-#attachments-toggle {
-  width: 100%;
-  background: none;
-  border: none;
-  padding: 10px 16px;
-  text-align: left;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-}
-#attachments-toggle:hover { background: var(--bg); }
-#attachments-toggle .arrow { transition: transform .2s; }
-#attachments-toggle.open .arrow { transform: rotate(90deg); }
-
-#attachments-body {
-  padding: 10px 16px;
-  display: none;
-}
-#attachments-body.open { display: block; }
 
 #drop-zone {
   border: 2px dashed var(--border);
@@ -721,8 +698,7 @@ progress::-moz-progress-bar { background: var(--accent); }
   #btn-edit-toggle,
   #btn-reindex,
   #btn-delete,
-  #reindex-all-btn,
-  #attachments-toggle {
+  #reindex-all-btn {
     min-height: 44px;
     padding-top: 10px;
     padding-bottom: 10px;
