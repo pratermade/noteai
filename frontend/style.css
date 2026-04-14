@@ -729,5 +729,47 @@ progress::-moz-progress-bar { background: var(--accent); }
     width: 100%;
     flex-basis: 100%;
     order: -1;
+    font-size: 20px;
   }
+
+  /* ── Android readability ── */
+
+  /* Base font — scales all inherited text; prevents auto-zoom on inputs */
+  body { font-size: 16px; }
+
+  /* Inputs must be ≥16px to prevent Android auto-zoom on focus */
+  #search-input { font-size: 16px; }
+  .meta-field input { font-size: 16px; padding: 6px 10px; }
+  #tag-input { font-size: 16px; }
+
+  /* Content areas */
+  #note-content  { font-size: 15px; }
+  #note-preview  { font-size: 15px; }
+  .note-summary-text { font-size: 15px; }
+
+  /* Note list */
+  .note-card { padding: 14px 16px; }
+  .note-card-title { font-size: 15px; }
+  .note-card-meta,
+  .note-card-snippet,
+  .note-card-summary { font-size: 13px; }
+  .tag-chip { font-size: 13px; padding: 2px 9px; }
+
+  /* Toolbar button labels */
+  #btn-edit-toggle,
+  #btn-reindex,
+  #btn-delete,
+  #btn-save,
+  #btn-home { font-size: 14px; }
+
+  /* Sidebar */
+  .nav-item { font-size: 15px; }
+  .nav-section-title { font-size: 12px; }
+
+  /* Attachment details */
+  .att-meta, .att-summary, .att-status { font-size: 13px; }
+
+  /* Misc labels */
+  .badge { font-size: 12px; }
+  .note-summary-label { font-size: 12px; }
 }
