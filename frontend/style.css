@@ -210,6 +210,7 @@ body {
 .type-markdown   { background: color-mix(in srgb, var(--muted) 15%, transparent); color: var(--muted); }
 .type-attachment { background: color-mix(in srgb, #f59e0b 15%, transparent); color: #b45309; }
 .type-url        { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+.type-video      { background: color-mix(in srgb, #ef4444 12%, transparent); color: #b91c1c; }
 
 /* ── Editor ── */
 #editor-panel {

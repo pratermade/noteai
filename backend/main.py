@@ -32,7 +32,7 @@ from .models import (
     ReindexJob, SearchRequest, SearchResult,
 )
 from .pdf_extractor import ExtractionError as PDFExtractionError, extract as pdf_extract
-from .web_extractor import ExtractionError as WebExtractionError, extract_url
+from .web_extractor import ExtractionError as WebExtractionError, extract_url, get_youtube_video_id
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +260,8 @@ async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
                 extracted_at=_now(),
                 size_bytes=result.char_count,
             )
-            await db.set_note_type(conn, note_id, 'url')
+            note_type = 'video' if get_youtube_video_id(url) else 'url'
+            await db.set_note_type(conn, note_id, note_type)
         await _index_attachment(att_id, note_id, result.text, label, source_url=url)
     except WebExtractionError as exc:
         logger.error("Web extraction failed", extra={"attachment_id": att_id, "note_id": note_id}, exc_info=True)
@@ -648,6 +649,8 @@ async def reindex_note(note_id: str, conn: DB, background_tasks: BackgroundTasks
     if atts:
         if any(a.mime_type == "application/pdf" for a in atts):
             await db.set_note_type(conn, note_id, 'attachment')
+        elif any(a.mime_type == "video/youtube" for a in atts):
+            await db.set_note_type(conn, note_id, 'video')
         elif any(a.mime_type == "text/html" for a in atts):
             await db.set_note_type(conn, note_id, 'url')
         for att in atts:
@@ -655,7 +658,7 @@ async def reindex_note(note_id: str, conn: DB, background_tasks: BackgroundTasks
                 background_tasks.add_task(
                     _pdf_pipeline, att.id, note_id, str(ATTACHMENT_DIR / att.stored_path), att.filename
                 )
-            elif att.mime_type == "text/html" and att.source_url:
+            elif att.mime_type in ("text/html", "video/youtube") and att.source_url:
                 background_tasks.add_task(_web_pipeline, att.id, note_id, att.source_url)
 
     await _index_note(note.id, note.title, note.content, note.tags, note.folder)
@@ -713,6 +716,8 @@ async def _bulk_reindex_task(job_id: str, notes: list[tuple]) -> None:
                 all_atts = await db.list_attachments(conn, note_id)
                 if any(a.mime_type == "application/pdf" for a in all_atts):
                     await db.set_note_type(conn, note_id, 'attachment')
+                elif any(a.mime_type == "video/youtube" for a in all_atts):
+                    await db.set_note_type(conn, note_id, 'video')
                 elif any(a.mime_type == "text/html" for a in all_atts):
                     await db.set_note_type(conn, note_id, 'url')
                 atts = await db.list_indexed_attachments(conn, note_id)
@@ -723,7 +728,7 @@ async def _bulk_reindex_task(job_id: str, notes: list[tuple]) -> None:
                     if att.mime_type == "application/pdf" and att.stored_path:
                         full_path = str(ATTACHMENT_DIR / att.stored_path)
                         await _pdf_pipeline(att.id, note_id, full_path, att.filename)
-                    elif att.mime_type == "text/html" and att.source_url:
+                    elif att.mime_type in ("text/html", "video/youtube") and att.source_url:
                         await _web_pipeline(att.id, note_id, att.source_url)
                     job.attachments_completed += 1
                 except Exception as exc:
@@ -802,12 +807,15 @@ async def share(
             resolved_url = url or text.strip()
             hostname = _hostname(resolved_url)
             note_title = title.strip() or hostname
-            note = await db.create_note(conn, note_title, resolved_url, [], "shared", note_type='url')
+            is_youtube = get_youtube_video_id(resolved_url) is not None
+            note_type = 'video' if is_youtube else 'url'
+            mime_type = 'video/youtube' if is_youtube else 'text/html'
+            note = await db.create_note(conn, note_title, resolved_url, [], "shared", note_type=note_type)
             att = await db.create_attachment(
                 conn,
                 note_id=note.id,
                 filename=hostname,
-                mime_type="text/html",
+                mime_type=mime_type,
                 size_bytes=0,
                 source_url=resolved_url,
             )

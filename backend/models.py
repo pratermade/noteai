@@ -9,7 +9,7 @@ class NoteCreate(BaseModel):
     content: str
     tags: list[str] = []
     folder: str = ""
-    note_type: Literal['markdown', 'attachment', 'url'] = 'markdown'
+    note_type: Literal['markdown', 'attachment', 'url', 'video'] = 'markdown'
 
 
 class NoteUpdate(BaseModel):
@@ -17,7 +17,7 @@ class NoteUpdate(BaseModel):
     content: str | None = None
     tags: list[str] | None = None
     folder: str | None = None
-    note_type: Literal['markdown', 'attachment', 'url'] | None = None
+    note_type: Literal['markdown', 'attachment', 'url', 'video'] | None = None
 
 
 class NoteResponse(BaseModel):
@@ -29,7 +29,7 @@ class NoteResponse(BaseModel):
     created_at: str
     updated_at: str
     indexed_at: str | None
-    note_type: Literal['markdown', 'attachment', 'url']
+    note_type: Literal['markdown', 'attachment', 'url', 'video']
     note_summary: str | None
 
 

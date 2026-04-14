@@ -12,3 +12,4 @@ pymupdf
 trafilatura
 python-multipart
 python-json-logger
+youtube-transcript-api
