@@ -20,7 +20,7 @@ from fastapi import (
     BackgroundTasks, Depends, FastAPI, File, Form, HTTPException,
     Query, Request, UploadFile, status,
 )
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
@@ -46,6 +46,10 @@ _latest_job_id: str | None = None
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 ATTACHMENT_DIR = Path(settings.attachment_dir)
+
+# Read SW template at import time so the dynamic route can inject the version.
+_app_version = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
+_sw_template = (FRONTEND_DIR / "service_worker.js").read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +131,14 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="NoterAI", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def no_cache_api(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -888,9 +900,18 @@ async def health():
 
 
 # ---------------------------------------------------------------------------
+# service_worker.js — served dynamically so APP_VERSION is injected at startup
 # manifest.json — served dynamically so APP_BASE_URL is always current
-# (must be defined before the StaticFiles mount)
+# (both must be defined before the StaticFiles mount)
 # ---------------------------------------------------------------------------
+
+@app.get("/service_worker.js", include_in_schema=False)
+async def service_worker():
+    return Response(
+        content=_sw_template.replace("'__APP_VERSION__'", f"'{_app_version}'"),
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 @app.get("/manifest.json", include_in_schema=False)
 async def manifest():
