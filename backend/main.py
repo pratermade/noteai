@@ -705,10 +705,16 @@ async def _bulk_reindex_task(job_id: str, notes: list[tuple]) -> None:
                 logger.warning("Could not delete old vectors for note %s", note_id, exc_info=True)
             await _index_note(note_id, title, content, tags, folder)
 
-            # Re-index attachments
+            # Re-index attachments — derive note_type from all attachments first,
+            # then re-run pipelines for those that have already been extracted.
             async with aiosqlite.connect(settings.database_url) as conn:
                 conn.row_factory = aiosqlite.Row
                 await conn.execute("PRAGMA foreign_keys = ON")
+                all_atts = await db.list_attachments(conn, note_id)
+                if any(a.mime_type == "application/pdf" for a in all_atts):
+                    await db.set_note_type(conn, note_id, 'attachment')
+                elif any(a.mime_type == "text/html" for a in all_atts):
+                    await db.set_note_type(conn, note_id, 'url')
                 atts = await db.list_indexed_attachments(conn, note_id)
 
             for att in atts:
@@ -790,20 +796,22 @@ async def share(
             background_tasks.add_task(
                 _pdf_pipeline, att.id, note.id, str(full_path), file.filename
             )
-        elif url:
-            # Case 2: URL share
-            hostname = _hostname(url)
+        elif url or text.strip().startswith(('http://', 'https://')):
+            # Case 2: URL share — either url field or text field contains a URL
+            # (some Android apps route the URL through the text field)
+            resolved_url = url or text.strip()
+            hostname = _hostname(resolved_url)
             note_title = title.strip() or hostname
-            note = await db.create_note(conn, note_title, url, [], "shared", note_type='url')
+            note = await db.create_note(conn, note_title, resolved_url, [], "shared", note_type='url')
             att = await db.create_attachment(
                 conn,
                 note_id=note.id,
                 filename=hostname,
                 mime_type="text/html",
                 size_bytes=0,
-                source_url=url,
+                source_url=resolved_url,
             )
-            background_tasks.add_task(_web_pipeline, att.id, note.id, url)
+            background_tasks.add_task(_web_pipeline, att.id, note.id, resolved_url)
         else:
             # Case 3: text only
             note_title = title[:80].strip() or "Shared note"
