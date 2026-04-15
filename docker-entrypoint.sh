@@ -15,9 +15,17 @@ done
 echo "ChromaDB ready."
 
 # Forward signals to children so the container stops cleanly
-trap "kill $CHROMA_PID" TERM INT
+trap "kill $CHROMA_PID $MAIN_PID" TERM INT
 
-exec uvicorn backend.main:app \
+# Start main app in background
+uvicorn backend.main:app \
     --host 0.0.0.0 \
     --port "${APP_PORT:-8889}" \
+    --log-level info &
+MAIN_PID=$!
+
+# Start RAG chat API (exec so it receives signals directly)
+exec uvicorn backend.chat_api:app \
+    --host 0.0.0.0 \
+    --port "${CHAT_PORT:-8084}" \
     --log-level info

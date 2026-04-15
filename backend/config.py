@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     summary_base_url: str | None = None
     summary_model: str = "gpt-4o-mini"
     summary_api_key: str | None = None
+    chat_llm_base_url: str | None = None  # falls back to summary_base_url
+    chat_llm_model: str | None = None     # falls back to summary_model
+    chat_n_results: int = 8               # note chunks injected as RAG context
+    chat_port: int = 8084                 # port for the RAG chat API
 
     model_config = {"env_file": ".env"}
 

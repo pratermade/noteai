@@ -19,8 +19,8 @@ COPY frontend/ frontend/
 # Runtime data lives in a mounted volume
 VOLUME ["/data"]
 
-# Only the app port is exposed; ChromaDB runs internally on 8006
-EXPOSE 8889
+# ChromaDB runs internally on 8006; chat API default port is 8084
+EXPOSE 8889 8084
 
 ENV DATABASE_URL=/data/notes.db \
     CHROMA_HOST=localhost \
