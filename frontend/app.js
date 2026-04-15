@@ -181,14 +181,14 @@ function renderPreview() {
 function renderSummarySection() {
   const items = [];
   if (state.currentNoteSummary && state.currentNoteType === 'markdown') {
-    items.push(`<div class="note-summary-item">
-       <div class="note-summary-label">Summary</div>
+    items.push(`<div class="note-summary-item summary-collapsed">
+       <div class="note-summary-label">Summary <span class="summary-toggle">▸</span></div>
        <div class="note-summary-text">${renderMarkdown(state.currentNoteSummary)}</div>
      </div>`);
   }
   for (const s of state.attachmentSummaries) {
-    items.push(`<div class="note-summary-item">
-       <div class="note-summary-label">${esc(s.filename)}</div>
+    items.push(`<div class="note-summary-item summary-collapsed">
+       <div class="note-summary-label">${esc(s.filename)} <span class="summary-toggle">▸</span></div>
        <div class="note-summary-text">${renderMarkdown(s.summary)}</div>
      </div>`);
   }
@@ -197,6 +197,9 @@ function renderSummarySection() {
     return;
   }
   noteSummarySection.innerHTML = items.join('');
+  noteSummarySection.querySelectorAll('.note-summary-item').forEach(item => {
+    item.addEventListener('click', () => item.classList.toggle('summary-collapsed'));
+  });
   noteSummarySection.style.display = 'flex';
 }
 
@@ -466,12 +469,9 @@ function setFilter(tag, folder) {
   state.filterFolder = folder;
   searchInput.value = '';
   state.searchMode = false;
+  closeEditor();
   loadNotes();
   renderSidebar();
-  if (state.currentNoteId) {
-    noteListPanel.style.display = 'flex';
-    noteListPanel.style.flexDirection = 'column';
-  }
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────
