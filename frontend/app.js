@@ -265,7 +265,6 @@ function closeEditor() {
   notePreview.innerHTML = '';
   $('video-iframe').src = '';
   $('video-embed').style.display = 'none';
-  urlBar.style.display = 'none';
   editorPanel.style.display = 'none';
   noteListPanel.style.display = 'flex';
   noteListPanel.style.flexDirection = 'column';
