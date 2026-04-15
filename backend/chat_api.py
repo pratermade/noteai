@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -40,29 +41,53 @@ def _headers() -> dict:
     return h
 
 
-async def _retrieve_context(query: str) -> str:
-    """Embed the query, search ChromaDB, return formatted context string."""
+async def _retrieve_context(query: str) -> tuple[str, list[dict]]:
+    """Embed the query, search ChromaDB, return (context_string, deduplicated_sources)."""
     try:
         emb = await embeddings.embed_texts([query])
         chunks = await vector_store.query(emb[0], settings.chat_n_results)
         if not chunks:
-            return ""
+            return "", []
         parts = []
+        seen_notes: dict[str, dict] = {}  # note_id → source entry, deduplicated
         for chunk in chunks:
             meta = chunk["metadata"]
             label = meta.get("source_label") or meta.get("note_id", "Note")
+            note_id = meta.get("note_id", "")
             parts.append(f"[{label}]\n{chunk['document']}")
-        return "\n\n---\n\n".join(parts)
+            if note_id and note_id not in seen_notes:
+                seen_notes[note_id] = {
+                    "note_id": note_id,
+                    "label": label,
+                    "source_url": meta.get("source_url") or "",
+                }
+        return "\n\n---\n\n".join(parts), list(seen_notes.values())
     except Exception:
         logger.warning("RAG retrieval failed", exc_info=True)
+        return "", []
+
+
+def _format_sources_md(sources: list[dict]) -> str:
+    if not sources:
         return ""
+    base = settings.app_base_url.rstrip("/")
+    lines = ["", "---", "**Sources**"]
+    for s in sources:
+        note_link = f"{base}/?note={s['note_id']}"
+        line = f"- [{s['label']}]({note_link})"
+        if s["source_url"]:
+            line += f" · [original]({s['source_url']})"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _build_messages(original: list[dict], context: str) -> list[dict]:
     system = (
         "You are a helpful assistant with access to the user's personal notes. "
+        "You are a midieval librarian scholar (a bit cartoony) that is happy to help anyone that wants to learn, using your library"
         "Use the context below — excerpts from their notes — to answer accurately. "
         "If the notes don't contain relevant information, say so and answer from general knowledge."
+        "If the answer from the notes is incomplete, say so and expand the thoughts from general knowledge."
     )
     if context:
         system += f"\n\n## Relevant notes\n\n{context}"
@@ -114,7 +139,8 @@ async def chat_completions(body: ChatRequest):
     # RAG: embed the last user message to retrieve relevant note chunks
     user_msgs = [m for m in body.messages if m.role == "user"]
     query = user_msgs[-1].content if user_msgs else ""
-    context = await _retrieve_context(query) if query else ""
+    context, sources = await _retrieve_context(query) if query else ("", [])
+    sources_md = _format_sources_md(sources)
 
     messages = _build_messages([m.model_dump() for m in body.messages], context)
 
@@ -123,20 +149,43 @@ async def chat_completions(body: ChatRequest):
         payload["max_tokens"] = body.max_tokens
     if body.temperature is not None:
         payload["temperature"] = body.temperature
+
     if body.stream:
         payload["stream"] = True
 
-    if body.stream:
         async def _stream():
+            buf = b""
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream(
                     "POST", _llm_url(), json=payload, headers=_headers()
                 ) as resp:
-                    async for chunk in resp.aiter_bytes():
-                        yield chunk
+                    async for raw in resp.aiter_bytes():
+                        buf += raw
+                        lines = buf.split(b"\n")
+                        buf = lines[-1]  # keep incomplete line in buffer
+                        for line in lines[:-1]:
+                            if line.strip() == b"data: [DONE]":
+                                if sources_md:
+                                    src_chunk = json.dumps({
+                                        "id": "chatcmpl-src",
+                                        "object": "chat.completion.chunk",
+                                        "choices": [{"index": 0, "delta": {"content": sources_md}, "finish_reason": None}],
+                                    })
+                                    yield f"data: {src_chunk}\n\n".encode()
+                                yield b"data: [DONE]\n\n"
+                            else:
+                                yield line + b"\n"
+            if buf.strip():
+                yield buf
 
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(_llm_url(), json=payload, headers=_headers())
-        return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    data = resp.json()
+    if sources_md and resp.status_code == 200:
+        try:
+            data["choices"][0]["message"]["content"] += sources_md
+        except (KeyError, IndexError, TypeError):
+            pass
+    return JSONResponse(content=data, status_code=resp.status_code)
