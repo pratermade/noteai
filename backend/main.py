@@ -372,6 +372,66 @@ async def _llm_summary(text: str) -> str:
         return _truncate_summary(text)
 
 
+async def _llm_journal_rewrite(text: str) -> str:
+    if not settings.summary_base_url:
+        return text
+    headers = {"Content-Type": "application/json"}
+    if settings.summary_api_key:
+        headers["Authorization"] = f"Bearer {settings.summary_api_key}"
+    payload = {
+        "model": settings.summary_model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a personal journal assistant. Transform the following rough "
+                    "voice transcript into a well-structured, first-person journal entry. "
+                    "Fix grammar, organize thoughts clearly, remove filler words and "
+                    "repetitions, and write in a natural reflective tone. Keep the content "
+                    "faithful to the original — do not add or invent details. "
+                    "Start directly with the journal content, no preamble."
+                ),
+            },
+            {"role": "user", "content": text[:12000]},
+        ],
+        "max_tokens": 1500,
+    }
+    try:
+        client = _get_summary_client()
+        resp = await client.post(
+            f"{settings.summary_base_url}/v1/chat/completions",
+            json=payload,
+            headers=headers,
+        )
+        if resp.status_code != 200:
+            return text
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        logger.warning("Journal rewrite LLM call failed — returning original", exc_info=True)
+        return text
+
+
+async def _journal_pipeline(note_id: str) -> None:
+    """Rewrite note content as a clean journal entry when saved to the Journal folder."""
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            note = await db.get_note(conn, note_id)
+            if not note or not note.content.strip():
+                return
+            rewritten = await _llm_journal_rewrite(note.content)
+            title = note.title
+            if not title or title.lower() in ("untitled", "shared note"):
+                title = f"Journal — {datetime.now(timezone.utc).strftime('%B %-d, %Y')}"
+            await db.update_note(conn, note_id, title=title, content=rewritten)
+        await vector_store.delete_by_note_id(note_id)
+        await _index_note(note_id, title, rewritten, note.tags, "Journal")
+        logger.info("Journal rewrite complete for note %s", note_id)
+    except Exception:
+        logger.warning("Journal pipeline failed for note %s", note_id, exc_info=True)
+
+
 async def _backfill_summaries(rows: list[tuple[str, str]]) -> None:
     """Generate LLM summaries for attachments that have extracted text but no summary."""
     logger.info("Starting LLM summary backfill for %d attachment(s)...", len(rows))
@@ -427,9 +487,12 @@ async def get_note(note_id: str, conn: DB):
 async def create_note(body: NoteCreate, conn: DB, background_tasks: BackgroundTasks):
     note = await db.create_note(conn, body.title, body.content, body.tags, body.folder,
                                 reminder_at=body.reminder_at)
-    background_tasks.add_task(
-        _index_note, note.id, note.title, note.content, note.tags, note.folder
-    )
+    if note.folder == "Journal":
+        background_tasks.add_task(_journal_pipeline, note.id)
+    else:
+        background_tasks.add_task(
+            _index_note, note.id, note.title, note.content, note.tags, note.folder
+        )
     return note
 
 
@@ -449,9 +512,12 @@ async def update_note(note_id: str, body: NoteUpdate, conn: DB,
         await vector_store.delete_by_note_id(note_id)
     except Exception as exc:
         logger.warning("Could not delete old vectors for note %s: %s", note_id, exc)
-    background_tasks.add_task(
-        _index_note, note.id, note.title, note.content, note.tags, note.folder
-    )
+    if note.folder == "Journal":
+        background_tasks.add_task(_journal_pipeline, note.id)
+    else:
+        background_tasks.add_task(
+            _index_note, note.id, note.title, note.content, note.tags, note.folder
+        )
     return note
 
 
