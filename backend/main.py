@@ -425,7 +425,8 @@ async def get_note(note_id: str, conn: DB):
 
 @app.post("/api/notes", response_model=NoteResponse, status_code=201)
 async def create_note(body: NoteCreate, conn: DB, background_tasks: BackgroundTasks):
-    note = await db.create_note(conn, body.title, body.content, body.tags, body.folder)
+    note = await db.create_note(conn, body.title, body.content, body.tags, body.folder,
+                                reminder_at=body.reminder_at)
     background_tasks.add_task(
         _index_note, note.id, note.title, note.content, note.tags, note.folder
     )
@@ -438,7 +439,9 @@ async def update_note(note_id: str, body: NoteUpdate, conn: DB,
     existing = await db.get_note(conn, note_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Note not found")
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    raw = body.model_dump(exclude_unset=True)
+    # Allow reminder_at=None to clear it, but drop other None values (means "don't change")
+    fields = {k: v for k, v in raw.items() if v is not None or k == "reminder_at"}
     note = await db.update_note(conn, note_id, **fields)
     # Clear indexed_at and re-index
     await db.clear_note_indexed(conn, note_id)

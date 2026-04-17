@@ -23,6 +23,7 @@ class NoteCreate(BaseModel):
     tags: list[str] = []
     folder: str = "Unfiled"
     note_type: Literal['markdown', 'attachment', 'url', 'video'] = 'markdown'
+    reminder_at: str | None = None
 
     @field_validator("folder")
     @classmethod
@@ -38,6 +39,8 @@ class NoteUpdate(BaseModel):
     tags: list[str] | None = None
     folder: str | None = None
     note_type: Literal['markdown', 'attachment', 'url', 'video'] | None = None
+    reminder_at: str | None = None
+    reminder_done: bool | None = None
 
     @field_validator("folder")
     @classmethod
@@ -58,6 +61,8 @@ class NoteResponse(BaseModel):
     indexed_at: str | None
     note_type: Literal['markdown', 'attachment', 'url', 'video']
     note_summary: str | None
+    reminder_at: str | None
+    reminder_done: bool
 
 
 class AttachmentResponse(BaseModel):

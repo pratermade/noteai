@@ -17,6 +17,7 @@ let state = {
   attachmentSummaries: [],
   currentNoteType: 'markdown',
   currentNoteSummary: null,
+  reminderDone: false,
 };
 
 marked.use({ gfm: true, breaks: true });
@@ -29,7 +30,9 @@ const editorPanel   = $('editor-panel');
 const noteListPanel = $('note-list-panel');
 const titleInput    = $('note-title-input');
 const contentArea   = $('note-content');
-const folderInput   = $('folder-input');
+const folderInput    = $('folder-input');
+const reminderInput  = $('reminder-input');
+const btnReminderDone = $('btn-reminder-done');
 const tagInput      = $('tag-input');
 const tagChips      = $('tag-chips');
 const saveBadge     = $('save-badge');
@@ -127,6 +130,7 @@ function renderNoteList(notes) {
       <div class="note-card-meta">
         <span class="note-type-badge type-${noteType}">${noteType}</span>
         ${n.folder ? `<span>📁 ${esc(n.folder)}</span>` : ''}
+        ${n.reminder_at && !n.reminder_done ? `<span title="Reminder: ${esc(n.reminder_at)}">🔔</span>` : ''}
         ${tagHtml}
         <span>${relTime(n.updated_at)}</span>
         ${n.indexed_at ? '' : '<span style="color:var(--warn)">⏳ unindexed</span>'}
@@ -227,6 +231,9 @@ async function openNote(id) {
     titleInput.value    = note.title;
     contentArea.value   = note.content;
     folderInput.value   = note.folder;
+    reminderInput.value = note.reminder_at || '';
+    state.reminderDone  = note.reminder_done || false;
+    updateReminderDoneBtn();
     renderTagChips(note.tags);
     state.attachmentSummaries = [];
     state.currentNoteType = note.note_type || 'markdown';
@@ -313,10 +320,12 @@ tagInput.addEventListener('keydown', e => {
 // ── Save ───────────────────────────────────────────────────────────────────
 
 async function saveNote() {
-  const title   = titleInput.value.trim() || 'Untitled';
-  const content = contentArea.value;
-  const folder  = folderInput.value.trim();
-  const tags    = getCurrentTags();
+  const title       = titleInput.value.trim() || 'Untitled';
+  const content     = contentArea.value;
+  const folder      = folderInput.value.trim();
+  const tags        = getCurrentTags();
+  const reminder_at = reminderInput.value || null;
+  const reminder_done = state.reminderDone;
 
   setBadge('saving');
   try {
@@ -324,13 +333,13 @@ async function saveNote() {
       await apiFetch(`/api/notes/${state.currentNoteId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, content, folder, tags }),
+        body: JSON.stringify({ title, content, folder, tags, reminder_at, reminder_done }),
       });
     } else {
       const note = await apiFetch('/api/notes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, content, folder, tags }),
+        body: JSON.stringify({ title, content, folder, tags, reminder_at }),
       });
       state.currentNoteId = note.id;
     }
@@ -736,6 +745,9 @@ $('btn-new-note').addEventListener('click', () => {
   titleInput.value  = '';
   contentArea.value = '';
   folderInput.value = 'Unfiled';
+  reminderInput.value = '';
+  state.reminderDone = false;
+  updateReminderDoneBtn();
   renderTagChips([]);
   setBadge('');
   attList.innerHTML = '';
@@ -766,6 +778,28 @@ titleInput.addEventListener('input', () => { state.saveDirty = true; });
 folderInput.addEventListener('change', () => { state.saveDirty = true; });
 contentArea.addEventListener('input', () => {
   state.saveDirty = true;
+});
+
+function updateReminderDoneBtn() {
+  if (!reminderInput.value) {
+    btnReminderDone.style.display = 'none';
+    return;
+  }
+  btnReminderDone.style.display = '';
+  btnReminderDone.textContent = state.reminderDone ? '✓ Done' : 'Mark Done';
+  btnReminderDone.disabled = state.reminderDone;
+}
+
+reminderInput.addEventListener('change', () => {
+  state.reminderDone = false;
+  state.saveDirty = true;
+  updateReminderDoneBtn();
+});
+
+btnReminderDone.addEventListener('click', async () => {
+  state.reminderDone = true;
+  updateReminderDoneBtn();
+  await saveNote();
 });
 
 // ── Utilities ──────────────────────────────────────────────────────────────

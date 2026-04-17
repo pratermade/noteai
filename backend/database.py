@@ -62,7 +62,11 @@ async def init_db(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE notes ADD COLUMN note_type TEXT NOT NULL DEFAULT 'markdown'")
     if "note_summary" not in note_cols:
         await db.execute("ALTER TABLE notes ADD COLUMN note_summary TEXT")
-    if "note_type" not in note_cols or "note_summary" not in note_cols:
+    if "reminder_at" not in note_cols:
+        await db.execute("ALTER TABLE notes ADD COLUMN reminder_at TEXT")
+    if "reminder_done" not in note_cols:
+        await db.execute("ALTER TABLE notes ADD COLUMN reminder_done INTEGER NOT NULL DEFAULT 0")
+    if any(c not in note_cols for c in ("note_type", "note_summary", "reminder_at", "reminder_done")):
         await db.commit()
 
 
@@ -78,6 +82,8 @@ def _row_to_note(row: aiosqlite.Row) -> NoteResponse:
         indexed_at=row["indexed_at"],
         note_type=row["note_type"],
         note_summary=row["note_summary"],
+        reminder_at=row["reminder_at"],
+        reminder_done=bool(row["reminder_done"]),
     )
 
 
@@ -110,12 +116,13 @@ async def get_db() -> aiosqlite.Connection:
 
 async def create_note(db: aiosqlite.Connection, title: str, content: str,
                       tags: list[str], folder: str,
-                      note_type: str = 'markdown') -> NoteResponse:
+                      note_type: str = 'markdown',
+                      reminder_at: str | None = None) -> NoteResponse:
     note_id = str(uuid.uuid4())
     now = _now()
     await db.execute(
-        "INSERT INTO notes (id, title, content, tags, folder, created_at, updated_at, note_type) VALUES (?,?,?,?,?,?,?,?)",
-        (note_id, title, content, json.dumps(tags), folder, now, now, note_type),
+        "INSERT INTO notes (id, title, content, tags, folder, created_at, updated_at, note_type, reminder_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (note_id, title, content, json.dumps(tags), folder, now, now, note_type, reminder_at),
     )
     await db.commit()
     return await get_note(db, note_id)
@@ -196,6 +203,15 @@ async def list_tags(db: aiosqlite.Connection) -> list[str]:
 
 async def list_folders(db: aiosqlite.Connection) -> list[str]:
     return FOLDERS
+
+
+async def get_due_reminders(db: aiosqlite.Connection, today: str) -> list[dict]:
+    async with db.execute(
+        "SELECT id, title, reminder_at FROM notes WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+        (today,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [{"id": r["id"], "title": r["title"], "reminder_at": r["reminder_at"]} for r in rows]
 
 
 # Attachments

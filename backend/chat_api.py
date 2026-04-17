@@ -5,7 +5,9 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import date
 
+import aiosqlite
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -70,6 +72,39 @@ def _headers() -> dict:
     if settings.summary_api_key:
         h["Authorization"] = f"Bearer {settings.summary_api_key}"
     return h
+
+
+_last_reminder_date: str | None = None
+
+
+async def _get_daily_reminder_text() -> str:
+    """Return a reminder block for the system prompt on the first chat of each day, else ''."""
+    global _last_reminder_date
+    today = date.today().isoformat()
+    if today == _last_reminder_date:
+        return ""
+    _last_reminder_date = today
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
+                "SELECT id, title, reminder_at FROM notes "
+                "WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+                (today,),
+            ) as cur:
+                rows = await cur.fetchall()
+        if not rows:
+            return ""
+        base = settings.app_base_url.rstrip("/")
+        lines = ["## Reminders due today or overdue\n"]
+        for r in rows:
+            link = f"{base}/?note={r['id']}"
+            lines.append(f"- **{r['title']}** — due {r['reminder_at']} · [Open note]({link})")
+        lines.append("\nPlease mention these reminders to the user at the start of your response.")
+        return "\n".join(lines)
+    except Exception:
+        logger.warning("Failed to fetch daily reminders", exc_info=True)
+        return ""
 
 
 _CLASSIFY_SYSTEM = (
@@ -167,7 +202,7 @@ def _format_sources_md(sources: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_messages(original: list[dict], context: str) -> list[dict]:
+def _build_messages(original: list[dict], context: str, reminders: str = "") -> list[dict]:
     system = (
         "You are a helpful assistant with access to the user's personal notes. "
         "You are a midieval librarian scholar (a bit cartoony) that is happy to help anyone that wants to learn, using your library"
@@ -175,6 +210,8 @@ def _build_messages(original: list[dict], context: str) -> list[dict]:
         "If the notes don't contain relevant information, say so and answer from general knowledge."
         "If the answer from the notes is incomplete, say so and expand the thoughts from general knowledge."
     )
+    if reminders:
+        system += f"\n\n{reminders}"
     if context:
         system += f"\n\n## Relevant notes\n\n{context}"
     msgs = [{"role": "system", "content": system}]
@@ -225,10 +262,16 @@ async def chat_completions(body: ChatRequest):
     # RAG: embed the last user message to retrieve relevant note chunks
     user_msgs = [m for m in body.messages if m.role == "user"]
     query = user_msgs[-1].content if user_msgs else ""
-    context, sources = await _retrieve_context(query) if query else ("", [])
+    async def _no_context():
+        return "", []
+
+    (context, sources), reminders = await asyncio.gather(
+        _retrieve_context(query) if query else _no_context(),
+        _get_daily_reminder_text(),
+    )
     sources_md = _format_sources_md(sources)
 
-    messages = _build_messages([m.model_dump() for m in body.messages], context)
+    messages = _build_messages([m.model_dump() for m in body.messages], context, reminders)
 
     payload: dict = {"model": _llm_model(), "messages": messages}
     if body.max_tokens is not None:
