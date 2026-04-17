@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
@@ -14,7 +15,35 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="NoterAI RAG Chat")
+# ---------------------------------------------------------------------------
+# Persistent LLM HTTP client (reuses TCP connections across requests)
+# ---------------------------------------------------------------------------
+
+_llm_client: httpx.AsyncClient | None = None
+
+
+def _get_llm_client() -> httpx.AsyncClient:
+    global _llm_client
+    if _llm_client is None or _llm_client.is_closed:
+        _llm_client = httpx.AsyncClient(timeout=120.0)
+    return _llm_client
+
+
+async def close_llm_client() -> None:
+    global _llm_client
+    if _llm_client and not _llm_client.is_closed:
+        await _llm_client.aclose()
+        _llm_client = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await close_llm_client()
+    await embeddings.close_client()
+
+
+app = FastAPI(title="NoterAI RAG Chat", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -155,33 +184,31 @@ async def chat_completions(body: ChatRequest):
 
         async def _stream():
             buf = b""
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                async with client.stream(
-                    "POST", _llm_url(), json=payload, headers=_headers()
-                ) as resp:
-                    async for raw in resp.aiter_bytes():
-                        buf += raw
-                        lines = buf.split(b"\n")
-                        buf = lines[-1]  # keep incomplete line in buffer
-                        for line in lines[:-1]:
-                            if line.strip() == b"data: [DONE]":
-                                if sources_md:
-                                    src_chunk = json.dumps({
-                                        "id": "chatcmpl-src",
-                                        "object": "chat.completion.chunk",
-                                        "choices": [{"index": 0, "delta": {"content": sources_md}, "finish_reason": None}],
-                                    })
-                                    yield f"data: {src_chunk}\n\n".encode()
-                                yield b"data: [DONE]\n\n"
-                            else:
-                                yield line + b"\n"
+            client = _get_llm_client()
+            async with client.stream("POST", _llm_url(), json=payload, headers=_headers()) as resp:
+                async for raw in resp.aiter_bytes():
+                    buf += raw
+                    lines = buf.split(b"\n")
+                    buf = lines[-1]  # keep incomplete line in buffer
+                    for line in lines[:-1]:
+                        if line.strip() == b"data: [DONE]":
+                            if sources_md:
+                                src_chunk = json.dumps({
+                                    "id": "chatcmpl-src",
+                                    "object": "chat.completion.chunk",
+                                    "choices": [{"index": 0, "delta": {"content": sources_md}, "finish_reason": None}],
+                                })
+                                yield f"data: {src_chunk}\n\n".encode()
+                            yield b"data: [DONE]\n\n"
+                        else:
+                            yield line + b"\n"
             if buf.strip():
                 yield buf
 
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(_llm_url(), json=payload, headers=_headers())
+    client = _get_llm_client()
+    resp = await client.post(_llm_url(), json=payload, headers=_headers())
     data = resp.json()
     if sources_md and resp.status_code == 200:
         try:
