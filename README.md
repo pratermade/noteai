@@ -4,9 +4,10 @@ A self-hosted note-keeping PWA with automatic RAG pipeline. Notes, PDFs, and web
 
 ## Features
 
-- **Three note types**: `markdown` (plain notes), `attachment` (PDF), `url` (web page)
+- **Four note types**: `markdown` (plain notes), `attachment` (PDF), `url` (web page), `video` (YouTube — embeds player and indexes transcript)
 - **Semantic search** across notes and attachment content
 - **LLM summaries** — auto-generated 50-word summary for every note and attachment
+- **RAG chat API** — OpenAI-compatible `/v1/chat/completions` endpoint (port 8084) that answers questions grounded in your notes
 - **Android PWA** — installable, with share-target support (share URLs, text, and PDFs directly from Chrome)
 - **Markdown preview** with edit/preview toggle
 
@@ -61,6 +62,10 @@ uvicorn backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem --host 0.
 | `SUMMARY_BASE_URL` | _(unset)_ | OpenAI-compatible chat completions base URL for LLM summaries |
 | `SUMMARY_MODEL` | `gpt-4o-mini` | Model name for summaries |
 | `SUMMARY_API_KEY` | _(unset)_ | Bearer token for hosted summary APIs |
+| `CHAT_LLM_BASE_URL` | _(falls back to `SUMMARY_BASE_URL`)_ | LLM base URL for the RAG chat API |
+| `CHAT_LLM_MODEL` | _(falls back to `SUMMARY_MODEL`)_ | Model name for the RAG chat API |
+| `CHAT_N_RESULTS` | `8` | Note chunks injected as RAG context per chat request |
+| `CHAT_PORT` | `8084` | Port for the RAG chat API service |
 
 ## How the RAG pipeline works
 
@@ -70,7 +75,27 @@ When a note is saved, the backend splits the content into overlapping token chun
 
 **URL attachments** (from the Android share target) are fetched and extracted with trafilatura, then indexed as attachment chunks attributed back to the parent note.
 
+**Video notes** fetch the YouTube transcript via the `youtube-transcript-api` library, index it as chunks, and embed an inline YouTube player above the note content.
+
 Semantic search embeds the query with the same model, retrieves the closest chunks from Chroma, and hydrates the result cards from SQLite.
+
+## RAG Chat API
+
+NoterAI exposes an OpenAI-compatible chat completions endpoint on port 8084 (`CHAT_PORT`). Point any OpenAI-compatible client at it using model name `noterai-rag`:
+
+```bash
+# Start the chat API alongside the main app
+uvicorn backend.chat_api:app --port 8084
+
+# Example request
+curl http://localhost:8084/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"noterai-rag","messages":[{"role":"user","content":"What did I write about Rust?"}]}'
+```
+
+Each request embeds the last user message, retrieves the closest note chunks from ChromaDB, and injects them as context before forwarding to the configured LLM. Source links back to the originating notes are appended to every response.
+
+Streaming (`"stream": true`) is supported. The chat API shares the same embedding and vector store configuration as the main app.
 
 ## HTTPS for Android PWA
 
