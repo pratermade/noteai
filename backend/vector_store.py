@@ -28,6 +28,9 @@ async def get_collection():
     return _collection
 
 
+_UPSERT_BATCH = 100
+
+
 async def upsert(
     documents: list[str],
     embeddings: list[list[float]],
@@ -35,12 +38,14 @@ async def upsert(
     ids: list[str],
 ) -> None:
     col = await get_collection()
-    await col.upsert(
-        documents=documents,
-        embeddings=embeddings,
-        metadatas=metadatas,
-        ids=ids,
-    )
+    for i in range(0, len(ids), _UPSERT_BATCH):
+        s = slice(i, i + _UPSERT_BATCH)
+        await col.upsert(
+            documents=documents[s],
+            embeddings=embeddings[s],
+            metadatas=metadatas[s],
+            ids=ids[s],
+        )
 
 
 async def delete_by_note_id(note_id: str) -> None:
