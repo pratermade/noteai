@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import aiosqlite
 
 from .config import settings
-from .models import NoteResponse, AttachmentResponse
+from .models import FOLDERS, NoteResponse, AttachmentResponse
 
 
 def _now() -> str:
@@ -21,7 +21,7 @@ async def init_db(db: aiosqlite.Connection) -> None:
             title TEXT NOT NULL,
             content TEXT NOT NULL,
             tags TEXT NOT NULL DEFAULT '[]',
-            folder TEXT NOT NULL DEFAULT '',
+            folder TEXT NOT NULL DEFAULT 'Unfiled',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             indexed_at TEXT,
@@ -195,11 +195,7 @@ async def list_tags(db: aiosqlite.Connection) -> list[str]:
 
 
 async def list_folders(db: aiosqlite.Connection) -> list[str]:
-    async with db.execute(
-        "SELECT DISTINCT folder FROM notes WHERE folder != '' ORDER BY folder"
-    ) as cur:
-        rows = await cur.fetchall()
-    return [r[0] for r in rows]
+    return FOLDERS
 
 
 # Attachments

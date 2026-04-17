@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -12,6 +13,7 @@ from pydantic import BaseModel
 
 from . import embeddings, vector_store
 from .config import settings
+from .models import FOLDERS
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +72,66 @@ def _headers() -> dict:
     return h
 
 
+_CLASSIFY_SYSTEM = (
+    "You are a folder classifier. Given a user's query, return a JSON array of the most relevant "
+    "folder names from this exact list: " + ", ".join(FOLDERS) + ".\n\n"
+    "Return only folders clearly relevant to the query's intent. "
+    "Return [] if the query is general or spans many folders.\n\n"
+    "Examples:\n"
+    "- 'what should I work on / tasks / action items' → [\"Todo\"]\n"
+    "- 'how did I feel / past experiences / last week' → [\"Journal\"]\n"
+    "- 'how does X work / what is X / specs / facts' → [\"Reference\"]\n"
+    "- 'my projects / project status' → [\"Project\"]\n"
+    "- 'ideas / brainstorm' → [\"Ideas\"]\n"
+    "- 'things to read / links to revisit' → [\"Review Later\"]\n"
+    "- 'tools / templates / assets' → [\"Resources\"]\n"
+    "- 'archived / old notes / past projects' → [\"Archive\"]\n"
+    "- General or cross-cutting questions → []\n\n"
+    "Respond with ONLY a valid JSON array, nothing else."
+)
+
+
+async def _classify_folders(query: str) -> list[str]:
+    """Ask the LLM which folders are relevant to this query. Returns [] on any error."""
+    try:
+        client = _get_llm_client()
+        payload = {
+            "model": _llm_model(),
+            "messages": [
+                {"role": "system", "content": _CLASSIFY_SYSTEM},
+                {"role": "user", "content": query},
+            ],
+            "max_tokens": 60,
+            "temperature": 0.0,
+        }
+        resp = await client.post(_llm_url(), json=payload, headers=_headers())
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        folders = json.loads(text)
+        if not isinstance(folders, list):
+            return []
+        valid = [f for f in folders if f in FOLDERS]
+        logger.info("Folder classification for query %r → %s", query[:60], valid)
+        return valid
+    except Exception:
+        logger.warning("Folder classification failed, using default filter", exc_info=True)
+        return []
+
+
 async def _retrieve_context(query: str) -> tuple[str, list[dict]]:
     """Embed the query, search ChromaDB, return (context_string, deduplicated_sources)."""
     try:
-        emb = await embeddings.embed_texts([query])
-        chunks = await vector_store.query(emb[0], settings.chat_n_results)
+        emb_result, folders = await asyncio.gather(
+            embeddings.embed_texts([query]),
+            _classify_folders(query),
+        )
+        emb = emb_result[0]
+
+        if folders:
+            where: dict | None = {"folder": {"$in": folders}}
+        else:
+            where = {"folder": {"$ne": "Archive"}}
+
+        chunks = await vector_store.query(emb, settings.chat_n_results, where=where)
         if not chunks:
             return "", []
         parts = []

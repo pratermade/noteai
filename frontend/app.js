@@ -735,7 +735,7 @@ $('btn-new-note').addEventListener('click', () => {
   state.currentNoteId = null;
   titleInput.value  = '';
   contentArea.value = '';
-  folderInput.value = '';
+  folderInput.value = 'Unfiled';
   renderTagChips([]);
   setBadge('');
   attList.innerHTML = '';
@@ -762,9 +762,8 @@ document.addEventListener('keydown', e => {
   }
 });
 
-[titleInput, folderInput].forEach(el =>
-  el.addEventListener('input', () => { state.saveDirty = true; })
-);
+titleInput.addEventListener('input', () => { state.saveDirty = true; });
+folderInput.addEventListener('change', () => { state.saveDirty = true; });
 contentArea.addEventListener('input', () => {
   state.saveDirty = true;
 });

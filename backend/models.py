@@ -1,15 +1,35 @@
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+
+FOLDERS = [
+    "Unfiled",
+    "Reference",
+    "Ideas",
+    "Todo",
+    "Review Later",
+    "Project",
+    "Journal",
+    "Resources",
+    "Archive",
+]
 
 
 class NoteCreate(BaseModel):
     title: str
     content: str
     tags: list[str] = []
-    folder: str = ""
+    folder: str = "Unfiled"
     note_type: Literal['markdown', 'attachment', 'url', 'video'] = 'markdown'
+
+    @field_validator("folder")
+    @classmethod
+    def folder_must_be_valid(cls, v: str) -> str:
+        if v not in FOLDERS:
+            raise ValueError(f"folder must be one of: {', '.join(FOLDERS)}")
+        return v
 
 
 class NoteUpdate(BaseModel):
@@ -18,6 +38,13 @@ class NoteUpdate(BaseModel):
     tags: list[str] | None = None
     folder: str | None = None
     note_type: Literal['markdown', 'attachment', 'url', 'video'] | None = None
+
+    @field_validator("folder")
+    @classmethod
+    def folder_must_be_valid(cls, v: str | None) -> str | None:
+        if v is not None and v not in FOLDERS:
+            raise ValueError(f"folder must be one of: {', '.join(FOLDERS)}")
+        return v
 
 
 class NoteResponse(BaseModel):

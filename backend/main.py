@@ -28,7 +28,7 @@ from . import database as db
 from . import embeddings, vector_store
 from .chunker import chunk_text
 from .models import (
-    AttachmentResponse, NoteCreate, NoteResponse, NoteUpdate,
+    AttachmentResponse, FOLDERS, NoteCreate, NoteResponse, NoteUpdate,
     ReindexJob, SearchRequest, SearchResult,
 )
 from .pdf_extractor import ExtractionError as PDFExtractionError, extract as pdf_extract
@@ -81,6 +81,13 @@ async def lifespan(app: FastAPI):
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA foreign_keys = ON")
         await db.init_db(conn)
+        # Migrate legacy free-form folders to "Unfiled"
+        placeholders = ",".join("?" * len(FOLDERS))
+        await conn.execute(
+            f"UPDATE notes SET folder = 'Unfiled' WHERE folder = '' OR folder NOT IN ({placeholders})",
+            FOLDERS,
+        )
+        await conn.commit()
         # Backfill summaries for existing attachments that have extracted text but no summary
         async with conn.execute(
             "SELECT id, extracted_text FROM attachments WHERE summary IS NULL AND extracted_text IS NOT NULL"
@@ -505,6 +512,8 @@ async def search(body: SearchRequest, conn: DB):
         conditions.append({"$or": [{"tags": {"$contains": t}} for t in body.tags]})
     if body.folder:
         conditions.append({"folder": {"$eq": body.folder}})
+    else:
+        conditions.append({"folder": {"$ne": "Archive"}})
 
     if len(conditions) == 1:
         where = conditions[0]
