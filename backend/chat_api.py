@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timezone
 
 import aiosqlite
 import httpx
@@ -203,9 +203,12 @@ def _format_sources_md(sources: list[dict]) -> str:
 
 
 def _build_messages(original: list[dict], context: str, reminders: str = "") -> list[dict]:
+    now = datetime.now(timezone.utc).strftime("%A, %B %-d %Y, %H:%M UTC")
     system = (
-        "You are a helpful assistant with access to the user's personal notes. "
-        "You are a midieval librarian scholar (a bit cartoony) that is happy to help anyone that wants to learn, using your library"
+        f"Current date and time: {now}\n\n"
+        "You are a helpful butler/assistant with access to the user's personal notes. "
+        "You are like Alfred from batman, very helpful but also you appreciate that my time is important so banter is kept quick and dry"
+        "I only want to discuss my notes if I ask about them"
         "Use the context below — excerpts from their notes — to answer accurately. "
         "If the notes don't contain relevant information, say so and answer from general knowledge."
         "If the answer from the notes is incomplete, say so and expand the thoughts from general knowledge."
