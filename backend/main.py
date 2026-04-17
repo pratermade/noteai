@@ -372,45 +372,6 @@ async def _llm_summary(text: str) -> str:
         return _truncate_summary(text)
 
 
-async def _llm_journal_rewrite(text: str) -> str:
-    if not settings.summary_base_url:
-        return text
-    headers = {"Content-Type": "application/json"}
-    if settings.summary_api_key:
-        headers["Authorization"] = f"Bearer {settings.summary_api_key}"
-    payload = {
-        "model": settings.summary_model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a personal journal assistant. Transform the following rough "
-                    "voice transcript into a well-structured, first-person journal entry. "
-                    "Fix grammar, organize thoughts clearly, remove filler words and "
-                    "repetitions, and write in a natural reflective tone. Keep the content "
-                    "faithful to the original — do not add or invent details. "
-                    "Start directly with the journal content, no preamble."
-                ),
-            },
-            {"role": "user", "content": text[:12000]},
-        ],
-        "max_tokens": 1500,
-    }
-    try:
-        client = _get_summary_client()
-        resp = await client.post(
-            f"{settings.summary_base_url}/v1/chat/completions",
-            json=payload,
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            return text
-        return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception:
-        logger.warning("Journal rewrite LLM call failed — returning original", exc_info=True)
-        return text
-
-
 async def _backfill_summaries(rows: list[tuple[str, str]]) -> None:
     """Generate LLM summaries for attachments that have extracted text but no summary."""
     logger.info("Starting LLM summary backfill for %d attachment(s)...", len(rows))
@@ -731,26 +692,6 @@ async def reindex_note(note_id: str, conn: DB, background_tasks: BackgroundTasks
 
     await _index_note(note.id, note.title, note.content, note.tags, note.folder)
     return await db.get_note(conn, note_id)
-
-
-@app.post("/api/notes/{note_id}/rewrite-journal", response_model=NoteResponse)
-async def rewrite_journal(note_id: str, conn: DB, background_tasks: BackgroundTasks):
-    note = await db.get_note(conn, note_id)
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-    rewritten = await _llm_journal_rewrite(note.content)
-    today = datetime.now(timezone.utc).strftime("%B %-d, %Y")
-    title = f"Journal — {today}"
-    updated = await db.update_note(conn, note_id, title=title, content=rewritten, folder="Journal")
-    await db.clear_note_indexed(conn, note_id)
-    try:
-        await vector_store.delete_by_note_id(note_id)
-    except Exception:
-        pass
-    background_tasks.add_task(
-        _index_note, updated.id, updated.title, updated.content, updated.tags, updated.folder,
-    )
-    return updated
 
 
 @app.post("/api/reindex", response_model=ReindexJob)
