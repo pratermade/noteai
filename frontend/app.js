@@ -18,6 +18,7 @@ let state = {
   currentNoteType: 'markdown',
   currentNoteSummary: null,
   reminderDone: false,
+  tasksMode: false,
 };
 
 marked.use({ gfm: true, breaks: true });
@@ -273,8 +274,12 @@ function closeEditor() {
   $('video-iframe').src = '';
   $('video-embed').style.display = 'none';
   editorPanel.style.display = 'none';
-  noteListPanel.style.display = 'flex';
-  noteListPanel.style.flexDirection = 'column';
+  if (state.tasksMode) {
+    openTasksPanel();
+  } else {
+    noteListPanel.style.display = 'flex';
+    noteListPanel.style.flexDirection = 'column';
+  }
   highlightActiveCard(null);
 }
 
@@ -432,37 +437,72 @@ deleteBtn.addEventListener('click', () => {
 
 async function loadSidebar() {
   try {
-    const [tags, folders, tasks] = await Promise.all([
+    const [tags, folders] = await Promise.all([
       apiFetch('/api/tags'),
       apiFetch('/api/folders'),
-      apiFetch('/api/tasks'),
     ]);
     state.tags    = tags;
     state.folders = folders;
     renderSidebar();
-    renderTasks(tasks);
   } catch (e) {
     console.error('loadSidebar', e);
   }
 }
 
-function renderTasks(tasks) {
-  const taskListEl = $('task-list');
-  taskListEl.innerHTML = '';
+async function openTasksPanel() {
+  clearTimers();
+  state.currentNoteId = null;
+  state.tasksMode = true;
+  editorPanel.style.display = 'none';
+  noteListPanel.style.display = 'none';
+  $('tasks-panel').style.display = 'flex';
+  $('tasks-panel').style.flexDirection = 'column';
+  $('btn-tasks').classList.add('active');
+  closeSidebar();
+  try {
+    const tasks = await apiFetch('/api/tasks');
+    renderTasksPanel(tasks);
+  } catch (e) {
+    console.error('openTasksPanel', e);
+  }
+}
+
+function renderTasksPanel(tasks) {
+  const listEl = $('tasks-list');
+  listEl.innerHTML = '';
   if (!tasks.length) {
-    taskListEl.innerHTML = '<div class="nav-item" style="color:var(--muted);font-style:italic">No upcoming tasks</div>';
+    listEl.innerHTML = '<div class="empty-state">No upcoming tasks.</div>';
     return;
   }
   const today = new Date().toISOString().slice(0, 10);
   for (const t of tasks) {
-    const item = document.createElement('div');
-    item.className = 'nav-item';
+    const row = document.createElement('div');
+    row.className = 'task-item';
     const overdue = t.reminder_at < today;
-    const dueColor = overdue ? 'var(--danger,#dc2626)' : 'var(--muted)';
-    item.innerHTML = `<span>${esc(t.title)}</span> <span style="font-size:11px;color:${dueColor}">· ${t.reminder_at}</span>`;
-    item.title = `Due: ${t.reminder_at}`;
-    item.addEventListener('click', () => { openNote(t.id); closeSidebar(); });
-    taskListEl.appendChild(item);
+    const dateColor = overdue ? 'var(--danger,#dc2626)' : 'var(--muted)';
+    row.innerHTML = `
+      <input type="checkbox" class="task-checkbox" title="Mark done" />
+      <span class="task-item-title">${esc(t.title)}</span>
+      <span class="task-item-date" style="color:${dateColor}">${t.reminder_at}</span>`;
+    row.querySelector('.task-item-title').addEventListener('click', () => openNote(t.id));
+    row.querySelector('.task-checkbox').addEventListener('change', async (e) => {
+      if (!e.target.checked) return;
+      try {
+        await apiFetch(`/api/notes/${t.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reminder_done: true }),
+        });
+        row.remove();
+        if (!$('tasks-list').querySelector('.task-item')) {
+          $('tasks-list').innerHTML = '<div class="empty-state">No upcoming tasks.</div>';
+        }
+      } catch (err) {
+        e.target.checked = false;
+        toast('Could not update task', 'error');
+      }
+    });
+    listEl.appendChild(row);
   }
 }
 
@@ -497,9 +537,14 @@ function renderSidebar() {
 function setFilter(tag, folder) {
   state.filterTag = tag;
   state.filterFolder = folder;
+  state.tasksMode = false;
+  $('tasks-panel').style.display = 'none';
+  $('btn-tasks').classList.remove('active');
   searchInput.value = '';
   state.searchMode = false;
-  closeEditor();
+  noteListPanel.style.display = 'flex';
+  noteListPanel.style.flexDirection = 'column';
+  editorPanel.style.display = 'none';
   loadNotes();
   renderSidebar();
 }
@@ -774,6 +819,9 @@ $('btn-new-note').addEventListener('click', () => {
   setBadge('');
   attList.innerHTML = '';
   notePreview.innerHTML = '';
+  state.tasksMode = false;
+  $('tasks-panel').style.display = 'none';
+  $('btn-tasks').classList.remove('active');
   editorPanel.style.display = 'flex';
   editorPanel.style.flexDirection = 'column';
   noteListPanel.style.display = 'none';
@@ -782,6 +830,7 @@ $('btn-new-note').addEventListener('click', () => {
   titleInput.focus();
 });
 
+$('btn-tasks').addEventListener('click', openTasksPanel);
 $('btn-save').addEventListener('click', saveNote);
 $('btn-home').addEventListener('click', closeEditor);
 $('btn-refresh').addEventListener('click', loadNotes);
