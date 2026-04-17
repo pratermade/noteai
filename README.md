@@ -5,9 +5,12 @@ A self-hosted note-keeping PWA with automatic RAG pipeline. Notes, PDFs, and web
 ## Features
 
 - **Four note types**: `markdown` (plain notes), `attachment` (PDF), `url` (web page), `video` (YouTube — embeds player and indexes transcript)
+- **Nine folders** — fixed categories (Unfiled, Reference, Ideas, Todo, Review Later, Project, Journal, Resources, Archive) to keep notes organized; Archive is excluded from search and RAG by default
 - **Semantic search** across notes and attachment content
 - **LLM summaries** — auto-generated 50-word summary for every note and attachment
-- **RAG chat API** — OpenAI-compatible `/v1/chat/completions` endpoint (port 8084) that answers questions grounded in your notes
+- **RAG chat API** — OpenAI-compatible `/v1/chat/completions` endpoint (port 8084) that answers questions grounded in your notes, with intent-based folder routing (e.g. "what should I work on?" searches only Todo notes) and daily reminder injection
+- **Date reminders** — set a due date on any note; the RAG chat surfaces overdue and due-today reminders on the first message of each day with direct links; mark done or snooze to a new date from the note editor
+- **Next Tasks panel** — sidebar shortcut listing the next 10 notes with due dates ordered soonest first; inline checkboxes mark tasks complete without leaving the view
 - **Android PWA** — installable, with share-target support (share URLs, text, and PDFs directly from Chrome)
 - **Markdown preview** with edit/preview toggle
 
@@ -93,7 +96,11 @@ curl http://localhost:8084/v1/chat/completions \
   -d '{"model":"noterai-rag","messages":[{"role":"user","content":"What did I write about Rust?"}]}'
 ```
 
-Each request embeds the last user message, retrieves the closest note chunks from ChromaDB, and injects them as context before forwarding to the configured LLM. Source links back to the originating notes are appended to every response.
+Each request:
+1. Runs a fast LLM call to classify which folder(s) best match the query intent, then scopes the vector search accordingly (falls back to all non-Archive folders for general questions)
+2. Embeds the last user message and retrieves the closest matching note chunks from ChromaDB
+3. Injects the chunks as numbered context; the LLM cites `[1]`, `[2]` etc. inline and only cited sources appear in the footer
+4. On the first request of each calendar day, prepends any overdue or due-today reminders to the system prompt
 
 Streaming (`"stream": true`) is supported. The chat API shares the same embedding and vector store configuration as the main app.
 
@@ -136,7 +143,7 @@ BASE=http://localhost:8889
 # Create a note
 curl -X POST $BASE/api/notes \
   -H 'Content-Type: application/json' \
-  -d '{"title":"My note","content":"Some content","tags":["work"],"folder":"projects"}'
+  -d '{"title":"My note","content":"Some content","tags":["work"],"folder":"Reference"}'
 
 # Semantic search
 curl -X POST $BASE/api/search \
