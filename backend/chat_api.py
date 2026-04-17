@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
@@ -77,12 +78,12 @@ def _headers() -> dict:
 _last_reminder_date: str | None = None
 
 
-async def _get_daily_reminder_text() -> str:
-    """Return a reminder block for the system prompt on the first chat of each day, else ''."""
+async def _get_daily_reminders() -> tuple[str, list[dict]]:
+    """Return (system_prompt_text, reminders_list) for due reminders on first chat of the day."""
     global _last_reminder_date
     today = date.today().isoformat()
     if today == _last_reminder_date:
-        return ""
+        return "", []
     _last_reminder_date = today
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
@@ -94,17 +95,29 @@ async def _get_daily_reminder_text() -> str:
             ) as cur:
                 rows = await cur.fetchall()
         if not rows:
-            return ""
-        base = settings.app_base_url.rstrip("/")
-        lines = ["## Reminders due today or overdue\n"]
-        for r in rows:
-            link = f"{base}/?note={r['id']}"
-            lines.append(f"- **{r['title']}** — due {r['reminder_at']} · [Open note]({link})")
-        lines.append("\nPlease mention these reminders to the user at the start of your response.")
-        return "\n".join(lines)
+            return "", []
+        items = [{"id": r["id"], "title": r["title"], "reminder_at": r["reminder_at"]} for r in rows]
+        titles = ", ".join(f'"{r["title"]}"' for r in rows)
+        system_text = (
+            f"## Reminders due today or overdue\n"
+            f"The user has {len(items)} pending reminder(s): {titles}. "
+            "Please mention these at the start of your response."
+        )
+        return system_text, items
     except Exception:
         logger.warning("Failed to fetch daily reminders", exc_info=True)
+        return "", []
+
+
+def _format_reminders_md(reminders: list[dict]) -> str:
+    if not reminders:
         return ""
+    base = settings.app_base_url.rstrip("/")
+    lines = ["", "---", "**Reminders**"]
+    for r in reminders:
+        link = f"{base}/?note={r['id']}"
+        lines.append(f"- [{r['title']}]({link}) — due {r['reminder_at']}")
+    return "\n".join(lines)
 
 
 _CLASSIFY_SYSTEM = (
@@ -153,7 +166,7 @@ async def _classify_folders(query: str) -> list[str]:
 
 
 async def _retrieve_context(query: str) -> tuple[str, list[dict]]:
-    """Embed the query, search ChromaDB, return (context_string, deduplicated_sources)."""
+    """Embed the query, search ChromaDB, return (context_string, numbered_sources)."""
     try:
         emb_result, folders = await asyncio.gather(
             embeddings.embed_texts([query]),
@@ -170,22 +183,31 @@ async def _retrieve_context(query: str) -> tuple[str, list[dict]]:
         if not chunks:
             return "", []
         parts = []
-        seen_notes: dict[str, dict] = {}  # note_id → source entry, deduplicated
+        sources: list[dict] = []
+        source_index: dict[str, int] = {}  # note_id → 1-based number
         for chunk in chunks:
             meta = chunk["metadata"]
             label = meta.get("source_label") or meta.get("note_id", "Note")
             note_id = meta.get("note_id", "")
-            parts.append(f"[{label}]\n{chunk['document']}")
-            if note_id and note_id not in seen_notes:
-                seen_notes[note_id] = {
+            if note_id and note_id not in source_index:
+                source_index[note_id] = len(sources) + 1
+                sources.append({
                     "note_id": note_id,
                     "label": label,
                     "source_url": meta.get("source_url") or "",
-                }
-        return "\n\n---\n\n".join(parts), list(seen_notes.values())
+                })
+            n = source_index.get(note_id, "?")
+            parts.append(f"[{n}] {label}\n{chunk['document']}")
+        return "\n\n---\n\n".join(parts), sources
     except Exception:
         logger.warning("RAG retrieval failed", exc_info=True)
         return "", []
+
+
+def _filter_sources_by_citations(text: str, sources: list[dict]) -> list[dict]:
+    """Return only sources whose [N] citation number appears in the response text."""
+    cited = {int(n) for n in re.findall(r'\[(\d+)\]', text)}
+    return [s for i, s in enumerate(sources, 1) if i in cited]
 
 
 def _format_sources_md(sources: list[dict]) -> str:
@@ -216,7 +238,11 @@ def _build_messages(original: list[dict], context: str, reminders: str = "") -> 
     if reminders:
         system += f"\n\n{reminders}"
     if context:
-        system += f"\n\n## Relevant notes\n\n{context}"
+        system += (
+            "\n\nWhen using information from the notes below, cite them inline as [1], [2], etc. "
+            "Only cite a source if you actually used it in your answer.\n\n"
+            f"## Relevant notes\n\n{context}"
+        )
     msgs = [{"role": "system", "content": system}]
     for m in original:
         if m["role"] != "system":
@@ -265,16 +291,16 @@ async def chat_completions(body: ChatRequest):
     # RAG: embed the last user message to retrieve relevant note chunks
     user_msgs = [m for m in body.messages if m.role == "user"]
     query = user_msgs[-1].content if user_msgs else ""
+
     async def _no_context():
         return "", []
 
-    (context, sources), reminders = await asyncio.gather(
+    (context, sources), (reminders_text, reminders_list) = await asyncio.gather(
         _retrieve_context(query) if query else _no_context(),
-        _get_daily_reminder_text(),
+        _get_daily_reminders(),
     )
-    sources_md = _format_sources_md(sources)
-
-    messages = _build_messages([m.model_dump() for m in body.messages], context, reminders)
+    reminders_md = _format_reminders_md(reminders_list)
+    messages = _build_messages([m.model_dump() for m in body.messages], context, reminders_text)
 
     payload: dict = {"model": _llm_model(), "messages": messages}
     if body.max_tokens is not None:
@@ -287,23 +313,34 @@ async def chat_completions(body: ChatRequest):
 
         async def _stream():
             buf = b""
+            response_text = ""
             client = _get_llm_client()
             async with client.stream("POST", _llm_url(), json=payload, headers=_headers()) as resp:
                 async for raw in resp.aiter_bytes():
                     buf += raw
                     lines = buf.split(b"\n")
-                    buf = lines[-1]  # keep incomplete line in buffer
+                    buf = lines[-1]
                     for line in lines[:-1]:
                         if line.strip() == b"data: [DONE]":
-                            if sources_md:
+                            used_sources = _filter_sources_by_citations(response_text, sources)
+                            footer = _format_sources_md(used_sources) + reminders_md
+                            if footer:
                                 src_chunk = json.dumps({
                                     "id": "chatcmpl-src",
                                     "object": "chat.completion.chunk",
-                                    "choices": [{"index": 0, "delta": {"content": sources_md}, "finish_reason": None}],
+                                    "choices": [{"index": 0, "delta": {"content": footer}, "finish_reason": None}],
                                 })
                                 yield f"data: {src_chunk}\n\n".encode()
                             yield b"data: [DONE]\n\n"
                         else:
+                            if line.startswith(b"data: "):
+                                try:
+                                    chunk_data = json.loads(line[6:])
+                                    content = chunk_data["choices"][0]["delta"].get("content", "")
+                                    if content:
+                                        response_text += content
+                                except Exception:
+                                    pass
                             yield line + b"\n"
             if buf.strip():
                 yield buf
@@ -313,9 +350,13 @@ async def chat_completions(body: ChatRequest):
     client = _get_llm_client()
     resp = await client.post(_llm_url(), json=payload, headers=_headers())
     data = resp.json()
-    if sources_md and resp.status_code == 200:
+    if resp.status_code == 200:
         try:
-            data["choices"][0]["message"]["content"] += sources_md
+            response_text = data["choices"][0]["message"]["content"]
+            used_sources = _filter_sources_by_citations(response_text, sources)
+            footer = _format_sources_md(used_sources) + reminders_md
+            if footer:
+                data["choices"][0]["message"]["content"] += footer
         except (KeyError, IndexError, TypeError):
             pass
     return JSONResponse(content=data, status_code=resp.status_code)
