@@ -432,15 +432,37 @@ deleteBtn.addEventListener('click', () => {
 
 async function loadSidebar() {
   try {
-    const [tags, folders] = await Promise.all([
+    const [tags, folders, tasks] = await Promise.all([
       apiFetch('/api/tags'),
       apiFetch('/api/folders'),
+      apiFetch('/api/tasks'),
     ]);
     state.tags    = tags;
     state.folders = folders;
     renderSidebar();
+    renderTasks(tasks);
   } catch (e) {
     console.error('loadSidebar', e);
+  }
+}
+
+function renderTasks(tasks) {
+  const taskListEl = $('task-list');
+  taskListEl.innerHTML = '';
+  if (!tasks.length) {
+    taskListEl.innerHTML = '<div class="nav-item" style="color:var(--muted);font-style:italic">No upcoming tasks</div>';
+    return;
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  for (const t of tasks) {
+    const item = document.createElement('div');
+    item.className = 'nav-item';
+    const overdue = t.reminder_at < today;
+    const dueColor = overdue ? 'var(--danger,#dc2626)' : 'var(--muted)';
+    item.innerHTML = `<span>${esc(t.title)}</span> <span style="font-size:11px;color:${dueColor}">· ${t.reminder_at}</span>`;
+    item.title = `Due: ${t.reminder_at}`;
+    item.addEventListener('click', () => { openNote(t.id); closeSidebar(); });
+    taskListEl.appendChild(item);
   }
 }
 

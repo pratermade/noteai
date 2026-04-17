@@ -491,6 +491,11 @@ async def list_tags(conn: DB):
     return await db.list_tags(conn)
 
 
+@app.get("/api/tasks", response_model=list[NoteResponse])
+async def list_tasks(conn: DB):
+    return await db.list_next_tasks(conn)
+
+
 @app.get("/api/folders")
 async def list_folders(conn: DB):
     return await db.list_folders(conn)

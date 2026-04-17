@@ -214,6 +214,20 @@ async def get_due_reminders(db: aiosqlite.Connection, today: str) -> list[dict]:
     return [{"id": r["id"], "title": r["title"], "reminder_at": r["reminder_at"]} for r in rows]
 
 
+async def list_next_tasks(db: aiosqlite.Connection, limit: int = 10) -> list[NoteResponse]:
+    async with db.execute(
+        """
+        SELECT * FROM notes
+        WHERE reminder_at IS NOT NULL AND reminder_done = 0
+        ORDER BY reminder_at ASC
+        LIMIT ?
+        """,
+        (limit,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [_row_to_note(r) for r in rows]
+
+
 # Attachments
 
 async def create_attachment(db: aiosqlite.Connection, note_id: str, filename: str,
