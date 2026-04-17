@@ -18,7 +18,7 @@
       if (res.ok) {
         const data = await res.json();
         clearInterval(timer);
-        location.replace(`/?note=${encodeURIComponent(data.note_id)}`);
+        showChoice(data.note_id);
         return;
       }
     } catch {}
@@ -31,5 +31,29 @@
   function showError() {
     document.getElementById('loading').style.display = 'none';
     document.getElementById('error').style.display   = 'block';
+  }
+
+  function showChoice(noteId) {
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('choice').style.display  = 'flex';
+
+    document.getElementById('btn-open').addEventListener('click', () => {
+      location.replace(`/?note=${encodeURIComponent(noteId)}`);
+    });
+
+    document.getElementById('btn-journal').addEventListener('click', async () => {
+      document.getElementById('btn-open').disabled    = true;
+      document.getElementById('btn-journal').disabled = true;
+      document.getElementById('rewrite-status').textContent = 'Rewriting as journal entry…';
+      try {
+        const r = await fetch(`/api/notes/${noteId}/rewrite-journal`, { method: 'POST' });
+        if (!r.ok) throw new Error('rewrite failed');
+        location.replace(`/?note=${encodeURIComponent(noteId)}`);
+      } catch {
+        document.getElementById('rewrite-status').textContent =
+          'Rewrite failed — opening original note.';
+        setTimeout(() => location.replace(`/?note=${encodeURIComponent(noteId)}`), 2000);
+      }
+    });
   }
 })();
