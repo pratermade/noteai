@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from datetime import datetime
 from functools import wraps
 
+import aiosqlite
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -19,6 +22,7 @@ from telegram.ext import (
 )
 from telegram.helpers import escape_markdown
 
+from .config import settings
 from .telegram_config import (
     TELEGRAM_ALLOWED_USERS,
     TELEGRAM_BOT_TOKEN,
@@ -31,6 +35,9 @@ from .telegram_config import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Held at module level so the GC never collects it.
+_scheduler: AsyncIOScheduler | None = None
 
 # chat_id -> list of {"role": "user"|"assistant", "content": str}
 conversations: dict[int, list[dict]] = {}
@@ -187,6 +194,7 @@ async def send_scheduled_reminder(bot) -> None:
     ]
     try:
         response = await query_rag(messages)
+        response = re.sub(r'\n---\n\*\*Sources\*\*.*?(?=\n---\n|$)', '', response, flags=re.DOTALL).strip()
         # Split if over limit
         while len(response) > _TELEGRAM_LIMIT:
             cut = response.rfind("\n", 0, _TELEGRAM_LIMIT)
@@ -200,18 +208,43 @@ async def send_scheduled_reminder(bot) -> None:
         logger.error("Scheduled reminder failed: %s", exc)
 
 
+async def _get_reminder_hours() -> list[int]:
+    """Read configured reminder hours from the DB; fall back to env-var default."""
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
+                "SELECT value FROM app_settings WHERE key = 'reminder_hours'"
+            ) as cur:
+                row = await cur.fetchone()
+            if row:
+                return [int(h.strip()) for h in row[0].split(",") if h.strip()]
+    except Exception as exc:
+        logger.warning("Could not read reminder_hours from DB, using env default: %s", exc)
+    return TELEGRAM_REMINDER_HOURS
+
+
+async def _hourly_check(bot) -> None:
+    """Fires every hour at :00; sends a reminder only if the current hour is configured."""
+    hours = await _get_reminder_hours()
+    current_hour = datetime.now().hour
+    logger.info("Hourly reminder check: current_hour=%d, configured=%s", current_hour, hours)
+    if current_hour in hours:
+        await send_scheduled_reminder(bot)
+
+
 async def post_init(application) -> None:
-    scheduler = AsyncIOScheduler()
-    for hour in TELEGRAM_REMINDER_HOURS:
-        scheduler.add_job(
-            send_scheduled_reminder,
-            CronTrigger(hour=hour, minute=0),
-            args=[application.bot],
-            id=f"reminder_{hour}",
-            replace_existing=True,
-        )
-    scheduler.start()
-    logger.info("Reminder scheduler started for hours: %s", TELEGRAM_REMINDER_HOURS)
+    global _scheduler
+    _scheduler = AsyncIOScheduler()
+    _scheduler.add_job(
+        _hourly_check,
+        CronTrigger(minute=0),
+        args=[application.bot],
+        id="reminder_check",
+        replace_existing=True,
+    )
+    _scheduler.start()
+    logger.info("Reminder scheduler started (hourly check, configured hours read from DB)")
 
 
 # ---------------------------------------------------------------------------

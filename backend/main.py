@@ -29,7 +29,7 @@ from . import embeddings, vector_store, wyoming_client
 from .chunker import chunk_text
 from .models import (
     AttachmentResponse, FOLDERS, NoteCreate, NoteResponse, NoteUpdate,
-    ReindexJob, SearchRequest, SearchResult,
+    ReindexJob, SearchRequest, SearchResult, SettingsPatch, SettingsResponse,
 )
 from .pdf_extractor import ExtractionError as PDFExtractionError, extract as pdf_extract
 from .web_extractor import ExtractionError as WebExtractionError, extract_url, get_youtube_video_id
@@ -921,6 +921,34 @@ async def reindex_status(job_id: str | None = Query(default=None)):
     if not job:
         raise HTTPException(status_code=404, detail="No reindex job found")
     return job
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+
+_DEFAULT_REMINDER_HOURS = "8,14"
+
+
+def _parse_hours(s: str) -> list[int]:
+    return [int(h.strip()) for h in s.split(",") if h.strip()]
+
+
+@app.get("/api/settings", response_model=SettingsResponse)
+async def get_settings(conn: DB):
+    raw = await db.get_setting(conn, "reminder_hours", _DEFAULT_REMINDER_HOURS)
+    return SettingsResponse(reminder_hours=_parse_hours(raw))
+
+
+@app.patch("/api/settings", response_model=SettingsResponse)
+async def update_settings(body: SettingsPatch, conn: DB):
+    if body.reminder_hours is not None:
+        for h in body.reminder_hours:
+            if not (0 <= h <= 23):
+                raise HTTPException(status_code=422, detail=f"Hour {h} out of range 0-23")
+        await db.set_setting(conn, "reminder_hours", ",".join(str(h) for h in body.reminder_hours))
+    raw = await db.get_setting(conn, "reminder_hours", _DEFAULT_REMINDER_HOURS)
+    return SettingsResponse(reminder_hours=_parse_hours(raw))
 
 
 # ---------------------------------------------------------------------------
