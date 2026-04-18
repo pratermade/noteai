@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from . import database as db
-from . import embeddings, vector_store
+from . import embeddings, vector_store, wyoming_client
 from .chunker import chunk_text
 from .models import (
     AttachmentResponse, FOLDERS, NoteCreate, NoteResponse, NoteUpdate,
@@ -412,12 +412,15 @@ async def _llm_journal_rewrite(text: str) -> str:
             {
                 "role": "system",
                 "content": (
-                    "You are a personal journal assistant. Transform the following rough "
-                    "voice transcript into a well-structured, first-person journal entry. "
-                    "Fix grammar, organize thoughts clearly, remove filler words and "
-                    "repetitions, and write in a natural reflective tone. Keep the content "
-                    "faithful to the original — do not add or invent details. "
-                    "Start directly with the journal content, no preamble."
+                    "You are a clinical note-taking assistant. Transform the following rough "
+                    "voice transcript into a structured journal entry using this exact format:\n\n"
+                    "**Time:** [time of day if mentioned, e.g. Morning / Afternoon / Evening]\n\n"
+                    "**Activities**\n"
+                    "* [bullet point per distinct activity or event]\n\n"
+                    "Rules: fix grammar, remove filler words and repetitions, one bullet per activity. "
+                    "Use plain direct language — no metaphors, emotional color, or reflective commentary. "
+                    "Keep faithful to the original, do not invent details. "
+                    "Start directly with the formatted entry, no preamble."
                 ),
             },
             {"role": "user", "content": text[:12000]},
@@ -590,9 +593,48 @@ async def list_tasks(conn: DB):
     return await db.list_next_tasks(conn)
 
 
+@app.get("/api/version")
+async def get_version():
+    return {"version": _app_version}
+
+
 @app.get("/api/folders")
 async def list_folders(conn: DB):
     return await db.list_folders(conn)
+
+
+@app.post("/api/journal/dictate", status_code=201)
+async def dictate_journal(
+    audio: UploadFile,
+    conn: DB,
+    background_tasks: BackgroundTasks,
+):
+    audio_bytes = await audio.read()
+    logger.info("dictate: received %d bytes, content_type=%s", len(audio_bytes), audio.content_type)
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(settings.whisper_base_url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 10300
+        logger.info("dictate: connecting to Wyoming at %s:%d", host, port)
+        transcript = (await wyoming_client.transcribe(audio_bytes, host, port)).strip()
+        logger.info("dictate: transcript=%r", transcript[:100] if transcript else "")
+    except Exception as exc:
+        logger.warning("dictate: failed — %s", exc)
+        raise HTTPException(status_code=502, detail=f"Whisper transcription failed: {exc}")
+
+    if not transcript:
+        raise HTTPException(status_code=422, detail="Transcription returned empty text")
+
+    note_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    await conn.execute(
+        "INSERT INTO notes (id, title, content, tags, folder, created_at, updated_at, note_type) VALUES (?,?,?,?,?,?,?,?)",
+        (note_id, "Untitled", transcript, json.dumps([]), "Journal", now, now, "markdown"),
+    )
+    await conn.commit()
+    await _journal_pipeline(note_id)
+    return {"id": note_id}
 
 
 # ---------------------------------------------------------------------------
