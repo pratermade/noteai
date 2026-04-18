@@ -10,7 +10,7 @@ FOLDERS = [
     "Ideas",
     "Todo",
     "Review Later",
-    "Project",
+    "Projects",
     "Journal",
     "Resources",
     "Archive",

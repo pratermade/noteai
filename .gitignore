@@ -1,5 +1,6 @@
 .env
 *.db
+*.pem
 attachments/
 chroma_data/
 __pycache__/

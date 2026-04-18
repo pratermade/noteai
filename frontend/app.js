@@ -354,10 +354,12 @@ async function saveNote() {
     startIndexPoll(state.currentNoteId);
     await loadNotes();
     await loadSidebar();
+    return true;
   } catch (e) {
     console.error('saveNote', e);
     setBadge('error');
     toast('Save failed: ' + e.message, 'error');
+    return false;
   }
 }
 
@@ -432,6 +434,21 @@ deleteBtn.addEventListener('click', () => {
     }, 5000);
   }
 });
+
+// ── Archive note ───────────────────────────────────────────────────────────
+
+async function archiveCurrentNote() {
+  if (!state.currentNoteId) return;
+  folderInput.value = 'Archive';
+  state.saveDirty = true;
+  const ok = await saveNote();
+  if (ok) {
+    closeEditor();
+    toast('Moved to Archive.', 'success');
+  }
+}
+
+$('btn-archive').addEventListener('click', archiveCurrentNote);
 
 // ── Sidebar ────────────────────────────────────────────────────────────────
 
