@@ -110,10 +110,22 @@ class SearchResult(BaseModel):
 
 class SettingsPatch(BaseModel):
     reminder_times: list[str] | None = None
+    telegram_bot_token: str | None = None
+    telegram_allowed_users: list[int] | None = None
+    telegram_reminder_chat_id: int | None = None
+    telegram_rag_url: str | None = None
+    telegram_rag_model: str | None = None
+    telegram_max_history: int | None = None
 
 
 class SettingsResponse(BaseModel):
     reminder_times: list[str]
+    telegram_bot_token: str
+    telegram_allowed_users: list[int]
+    telegram_reminder_chat_id: int
+    telegram_rag_url: str
+    telegram_rag_model: str
+    telegram_max_history: int
 
 
 class ReindexJob(BaseModel):

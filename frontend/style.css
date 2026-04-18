@@ -249,6 +249,37 @@ body {
   padding: 5px 12px;
 }
 .btn-add-time:hover { color: var(--accent); border-color: var(--accent); }
+.settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.settings-field label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+.settings-hint-inline { font-weight: 400; color: var(--muted); }
+.settings-field input[type=text],
+.settings-field input[type=password],
+.settings-field input[type=number] {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--text);
+  width: 100%;
+}
+.settings-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 .settings-actions {
   display: flex;
   justify-content: flex-end;

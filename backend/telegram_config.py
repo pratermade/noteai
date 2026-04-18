@@ -1,23 +1,47 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 
-TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
+_DATABASE_URL = os.environ.get("DATABASE_URL", "./notes.db")
+
+
+def _db_get(key: str) -> str | None:
+    try:
+        with sqlite3.connect(_DATABASE_URL) as conn:
+            cur = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _cfg(db_key: str, env_key: str, default: str = "") -> str:
+    """DB setting → env var → hardcoded default."""
+    return _db_get(db_key) or os.environ.get(env_key) or default
+
+
+# ── Required settings ────────────────────────────────────────────────────────
+
+TELEGRAM_BOT_TOKEN: str = _cfg("telegram_bot_token", "TELEGRAM_BOT_TOKEN")
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError(
+        "TELEGRAM_BOT_TOKEN is not configured. Set it in .env or via the web UI Settings."
+    )
+
+_reminder_chat_raw = _cfg("telegram_reminder_chat_id", "TELEGRAM_REMINDER_CHAT_ID", "0")
+TELEGRAM_REMINDER_CHAT_ID: int = int(_reminder_chat_raw) if _reminder_chat_raw.strip() else 0
+
+# ── Optional / defaulted settings ────────────────────────────────────────────
 
 TELEGRAM_ALLOWED_USERS: list[int] = [
-    int(u.strip()) for u in os.environ["TELEGRAM_ALLOWED_USERS"].split(",") if u.strip()
+    int(u.strip())
+    for u in _cfg("telegram_allowed_users", "TELEGRAM_ALLOWED_USERS").split(",")
+    if u.strip()
 ]
 
-TELEGRAM_MAX_HISTORY: int = int(os.environ.get("TELEGRAM_MAX_HISTORY", "20"))
+TELEGRAM_MAX_HISTORY: int = int(_cfg("telegram_max_history", "TELEGRAM_MAX_HISTORY", "20"))
 
-TELEGRAM_RAG_URL: str = os.environ.get("TELEGRAM_RAG_URL", "http://localhost:8084")
+TELEGRAM_RAG_URL: str = _cfg("telegram_rag_url", "TELEGRAM_RAG_URL", "http://localhost:8084")
 
-TELEGRAM_RAG_MODEL: str = os.environ.get("TELEGRAM_RAG_MODEL", "noterai-rag")
-
-TELEGRAM_REMINDER_HOURS: list[int] = [
-    int(h.strip())
-    for h in os.environ.get("TELEGRAM_REMINDER_HOURS", "8,14").split(",")
-    if h.strip()
-]
-
-TELEGRAM_REMINDER_CHAT_ID: int = int(os.environ["TELEGRAM_REMINDER_CHAT_ID"])
+TELEGRAM_RAG_MODEL: str = _cfg("telegram_rag_model", "TELEGRAM_RAG_MODEL", "noterai-rag")

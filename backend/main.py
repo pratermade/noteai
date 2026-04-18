@@ -950,10 +950,42 @@ async def _read_reminder_times(conn) -> list[str]:
     return _parse_times(_DEFAULT_REMINDER_TIMES)
 
 
+def _tg_env(env_key: str, default: str = "") -> str:
+    return os.environ.get(env_key, default)
+
+
+async def _build_settings_response(conn) -> SettingsResponse:
+    async def _get(key: str, env_key: str = "", default: str = "") -> str:
+        val = await db.get_setting(conn, key)
+        if val is not None:
+            return val
+        return os.environ.get(env_key, default) if env_key else default
+
+    times = await _read_reminder_times(conn)
+
+    allowed_raw = await _get("telegram_allowed_users", "TELEGRAM_ALLOWED_USERS", "")
+    allowed = [int(u.strip()) for u in allowed_raw.split(",") if u.strip()]
+
+    chat_id_raw = await _get("telegram_reminder_chat_id", "TELEGRAM_REMINDER_CHAT_ID", "0")
+    chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
+
+    max_hist_raw = await _get("telegram_max_history", "TELEGRAM_MAX_HISTORY", "20")
+    max_hist = int(max_hist_raw) if max_hist_raw.strip() else 20
+
+    return SettingsResponse(
+        reminder_times=times,
+        telegram_bot_token=await _get("telegram_bot_token", "TELEGRAM_BOT_TOKEN", ""),
+        telegram_allowed_users=allowed,
+        telegram_reminder_chat_id=chat_id,
+        telegram_rag_url=await _get("telegram_rag_url", "TELEGRAM_RAG_URL", "http://localhost:8084"),
+        telegram_rag_model=await _get("telegram_rag_model", "TELEGRAM_RAG_MODEL", "noterai-rag"),
+        telegram_max_history=max_hist,
+    )
+
+
 @app.get("/api/settings", response_model=SettingsResponse)
 async def get_settings(conn: DB):
-    times = await _read_reminder_times(conn)
-    return SettingsResponse(reminder_times=times)
+    return await _build_settings_response(conn)
 
 
 @app.patch("/api/settings", response_model=SettingsResponse)
@@ -967,8 +999,19 @@ async def update_settings(body: SettingsPatch, conn: DB):
             if not (0 <= h <= 23 and 0 <= mn <= 59):
                 raise HTTPException(status_code=422, detail=f"Time '{t}' out of range")
         await db.set_setting(conn, "reminder_times", ",".join(body.reminder_times))
-    times = await _read_reminder_times(conn)
-    return SettingsResponse(reminder_times=times)
+    if body.telegram_bot_token is not None:
+        await db.set_setting(conn, "telegram_bot_token", body.telegram_bot_token)
+    if body.telegram_allowed_users is not None:
+        await db.set_setting(conn, "telegram_allowed_users", ",".join(str(u) for u in body.telegram_allowed_users))
+    if body.telegram_reminder_chat_id is not None:
+        await db.set_setting(conn, "telegram_reminder_chat_id", str(body.telegram_reminder_chat_id))
+    if body.telegram_rag_url is not None:
+        await db.set_setting(conn, "telegram_rag_url", body.telegram_rag_url)
+    if body.telegram_rag_model is not None:
+        await db.set_setting(conn, "telegram_rag_model", body.telegram_rag_model)
+    if body.telegram_max_history is not None:
+        await db.set_setting(conn, "telegram_max_history", str(body.telegram_max_history))
+    return await _build_settings_response(conn)
 
 
 # ---------------------------------------------------------------------------
