@@ -136,6 +136,36 @@
         <div id="reminder-times-list"></div>
         <button id="btn-add-reminder-time" class="btn-add-time">+ Add time</button>
       </section>
+      <section class="settings-section">
+        <h2>Telegram Bot</h2>
+        <p class="settings-hint">Restart the Telegram bot after saving for changes to take effect.</p>
+        <div class="settings-fields">
+          <div class="settings-field">
+            <label>Bot Token</label>
+            <input id="tg-bot-token" type="password" placeholder="123456:ABC-..." autocomplete="off" />
+          </div>
+          <div class="settings-field">
+            <label>Allowed User IDs <span class="settings-hint-inline">(comma-separated)</span></label>
+            <input id="tg-allowed-users" type="text" placeholder="e.g. 123456789, 987654321" />
+          </div>
+          <div class="settings-field">
+            <label>Reminder Chat ID</label>
+            <input id="tg-reminder-chat-id" type="text" placeholder="e.g. -1001234567890" />
+          </div>
+          <div class="settings-field">
+            <label>RAG API URL</label>
+            <input id="tg-rag-url" type="text" placeholder="http://localhost:8084" />
+          </div>
+          <div class="settings-field">
+            <label>RAG Model</label>
+            <input id="tg-rag-model" type="text" placeholder="noterai-rag" />
+          </div>
+          <div class="settings-field">
+            <label>Max Conversation History</label>
+            <input id="tg-max-history" type="number" min="1" max="100" placeholder="20" />
+          </div>
+        </div>
+      </section>
       <div class="settings-actions">
         <button id="btn-settings-save">Save Settings</button>
       </div>

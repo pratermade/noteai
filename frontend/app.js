@@ -1041,6 +1041,12 @@ async function loadSettings() {
   try {
     const data = await apiFetch('/api/settings');
     renderReminderTimes(data.reminder_times);
+    $('tg-bot-token').value         = data.telegram_bot_token || '';
+    $('tg-allowed-users').value     = (data.telegram_allowed_users || []).join(', ');
+    $('tg-reminder-chat-id').value  = data.telegram_reminder_chat_id || '';
+    $('tg-rag-url').value           = data.telegram_rag_url || '';
+    $('tg-rag-model').value         = data.telegram_rag_model || '';
+    $('tg-max-history').value       = data.telegram_max_history || '';
   } catch (e) {
     console.warn('loadSettings failed', e);
   }
@@ -1053,14 +1059,36 @@ $('btn-add-reminder-time').addEventListener('click', () => {
 $('btn-settings-save').addEventListener('click', async () => {
   const inputs = reminderList.querySelectorAll('input[type=time]');
   const times = [...inputs].map(i => i.value).filter(Boolean);
+
+  const allowedRaw = $('tg-allowed-users').value;
+  const allowed = allowedRaw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+
+  const chatIdRaw = $('tg-reminder-chat-id').value.trim();
+  const chatId = chatIdRaw ? parseInt(chatIdRaw, 10) : 0;
+
+  const maxHistRaw = $('tg-max-history').value.trim();
+  const maxHist = maxHistRaw ? parseInt(maxHistRaw, 10) : 20;
+
+  const payload = {
+    reminder_times: times,
+    telegram_bot_token: $('tg-bot-token').value.trim() || undefined,
+    telegram_allowed_users: allowed,
+    telegram_reminder_chat_id: chatId || undefined,
+    telegram_rag_url: $('tg-rag-url').value.trim() || undefined,
+    telegram_rag_model: $('tg-rag-model').value.trim() || undefined,
+    telegram_max_history: maxHist || undefined,
+  };
+  // Drop undefined keys so PATCH treats them as "don't change"
+  Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
+
   try {
     const data = await apiFetch('/api/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reminder_times: times }),
+      body: JSON.stringify(payload),
     });
     renderReminderTimes(data.reminder_times);
-    toast('Settings saved.', 'success');
+    toast('Settings saved. Restart the Telegram bot to apply changes.', 'success');
   } catch (e) {
     toast('Save failed: ' + e.message, 'error');
   }
