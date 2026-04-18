@@ -265,6 +265,7 @@ body {
   color: var(--text);
 }
 .settings-hint-inline { font-weight: 400; color: var(--muted); }
+.settings-field select,
 .settings-field input[type=text],
 .settings-field input[type=password],
 .settings-field input[type=number] {
@@ -276,6 +277,7 @@ body {
   color: var(--text);
   width: 100%;
 }
+.settings-field select:focus,
 .settings-field input:focus {
   outline: none;
   border-color: var(--accent);

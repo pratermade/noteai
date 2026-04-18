@@ -1005,6 +1005,16 @@ const settingsView   = $('settings-view');
 const reminderList   = $('reminder-times-list');
 const journalReminderList = $('journal-reminder-times-list');
 
+// Populate timezone dropdown from browser's IANA list
+(function populateTzSelect() {
+  const sel = $('server-timezone');
+  const zones = Intl.supportedValuesOf('timeZone');
+  sel.appendChild(Object.assign(document.createElement('option'), { value: '', textContent: '— select timezone —' }));
+  for (const z of zones) {
+    sel.appendChild(Object.assign(document.createElement('option'), { value: z, textContent: z }));
+  }
+})();
+
 function showSettingsView() {
   noteListPanel.style.display   = 'none';
   editorPanel.style.display     = 'none';
