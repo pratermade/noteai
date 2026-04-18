@@ -9,7 +9,7 @@ A self-hosted note-keeping PWA with automatic RAG pipeline. Notes, PDFs, and web
 - **Semantic search** across notes and attachment content
 - **LLM summaries** — auto-generated 50-word summary for every note and attachment
 - **RAG chat API** — OpenAI-compatible `/v1/chat/completions` endpoint (port 8084) that answers questions grounded in your notes, with intent-based folder routing (e.g. "what should I work on?" searches only Todo notes) and daily reminder injection
-- **Date reminders** — set a due date on any note; the RAG chat surfaces overdue and due-today reminders on the first message of each day with direct links; mark done or snooze to a new date from the note editor
+- **Date reminders** — set a due date on any note; the RAG chat surfaces overdue and due-today reminders on every message with direct links; mark done or snooze to a new date from the note editor
 - **Next Tasks panel** — sidebar shortcut listing the next 10 notes with due dates ordered soonest first; inline checkboxes mark tasks complete without leaving the view
 - **Android PWA** — installable, with share-target support (share URLs, text, and PDFs directly from Chrome)
 - **Markdown preview** with edit/preview toggle
@@ -58,8 +58,10 @@ uvicorn backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem --host 0.
 | `EMBEDDING_BASE_URL` | `http://localhost:8080` | Embedding server URL |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Model name |
 | `EMBEDDING_BATCH_SIZE` | `32` | Embedding batch size |
-| `CHUNK_SIZE` | `512` | Tokens per chunk |
+| `CHUNK_SIZE` | `350` | Tokens per chunk (tiktoken cl100k_base) |
 | `CHUNK_OVERLAP` | `64` | Overlap between chunks |
+| `CHUNK_MAX_CHARS` | `500` | Hard character ceiling per chunk — guards against tokenizer mismatch between cl100k_base and the embedding model; lower if your embedding server has a small context window |
+| `INDEX_BATCH_SIZE` | `200` | Chunks embedded and upserted per round-trip — limits peak memory for large PDFs |
 | `ATTACHMENT_DIR` | `./attachments` | PDF storage directory |
 | `APP_BASE_URL` | `https://localhost:8443` | Public HTTPS URL (used in Android manifest) |
 | `SUMMARY_BASE_URL` | _(unset)_ | OpenAI-compatible chat completions base URL for LLM summaries |
@@ -74,9 +76,9 @@ uvicorn backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem --host 0.
 
 When a note is saved, the backend splits the content into overlapping token chunks (tiktoken `cl100k_base`), sends batches to the embedding server, and upserts vectors into ChromaDB with metadata (note ID, tags, folder).
 
-**PDF attachments** are extracted with PyMuPDF, chunked page-by-page, and indexed with IDs in the form `{attachment_id}_p{page}_c{chunk}`.
+**PDF attachments** are extracted with PyMuPDF, chunked, and indexed with IDs in the form `{attachment_id}_c{chunk}`. Large PDFs are processed in batches of `INDEX_BATCH_SIZE` chunks so partial progress is saved to ChromaDB even if a batch fails.
 
-**URL attachments** (from the Android share target) are fetched and extracted with trafilatura, then indexed as attachment chunks attributed back to the parent note.
+**URL attachments** (from the Android share target) are fetched with a browser User-Agent and extracted with trafilatura, then indexed as attachment chunks attributed back to the parent note. **Reddit URLs** (including mobile `/s/` share links) use Reddit's public JSON API instead of HTML scraping for reliable extraction.
 
 **Video notes** fetch the YouTube transcript via the `youtube-transcript-api` library, index it as chunks, and embed an inline YouTube player above the note content.
 
@@ -100,7 +102,7 @@ Each request:
 1. Runs a fast LLM call to classify which folder(s) best match the query intent, then scopes the vector search accordingly (falls back to all non-Archive folders for general questions)
 2. Embeds the last user message and retrieves the closest matching note chunks from ChromaDB
 3. Injects the chunks as numbered context; the LLM cites `[1]`, `[2]` etc. inline and only cited sources appear in the footer
-4. On the first request of each calendar day, prepends any overdue or due-today reminders to the system prompt
+4. Prepends any overdue or due-today reminders to the system prompt on every request
 
 Streaming (`"stream": true`) is supported. The chat API shares the same embedding and vector store configuration as the main app.
 
@@ -172,5 +174,6 @@ curl $BASE/health
 ## Notes
 
 - `attachments/` and `chroma_data/` are git-ignored — back them up separately.
-- After changing `CHUNK_SIZE` or `CHUNK_OVERLAP`, use "Reindex all notes" in the sidebar or `POST /api/reindex` to rebuild the vector index.
+- After changing `CHUNK_SIZE`, `CHUNK_OVERLAP`, or `CHUNK_MAX_CHARS`, use "Reindex all notes" in the sidebar or `POST /api/reindex` to rebuild the vector index.
+- If your embedding server has a small physical batch size (e.g. llama.cpp with `--ubatch-size 512`), lower `CHUNK_MAX_CHARS` (e.g. `400`) to avoid token overflow errors.
 - OCR for scanned PDFs is not supported.
