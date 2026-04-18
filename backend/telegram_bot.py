@@ -7,7 +7,8 @@ from functools import wraps
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from telegram import ChatAction, Update
+from telegram import Update
+from telegram.constants import ChatAction
 from telegram.error import BadRequest
 from telegram.ext import (
     ApplicationBuilder,
@@ -106,6 +107,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "Commands:\n"
         "/clear — Reset conversation history\n"
         "/status — Check RAG API health\n"
+        "/remind — Send a reminder now (for testing)\n"
         "/chatid — Show this chat's ID (for reminder config)"
     )
 
@@ -130,6 +132,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 @restricted
 async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Chat ID: {update.effective_chat.id}")
+
+
+@restricted
+async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.chat.send_action(ChatAction.TYPING)
+    await send_scheduled_reminder(context.bot)
 
 
 @restricted
@@ -217,6 +225,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("chatid", chatid_command))
+    app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Telegram bot started (long-polling)")
