@@ -821,6 +821,90 @@ function pollReindexJob(jobId, total) {
   }, 3000);
 }
 
+// ── Journal dictation ──────────────────────────────────────────────────────
+
+const dictateBtn    = $('btn-dictate');
+const dictateStatus = $('dictate-status');
+let mediaRecorder   = null;
+let audioChunks     = [];
+
+function setDictateStatus(msg) {
+  if (msg) {
+    dictateStatus.textContent = msg;
+    dictateStatus.style.display = '';
+  } else {
+    dictateStatus.style.display = 'none';
+  }
+}
+
+async function startDictation() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    toast('Microphone access denied.', 'error');
+    return;
+  }
+  audioChunks = [];
+  mediaRecorder = new MediaRecorder(stream);
+  mediaRecorder.addEventListener('dataavailable', e => { if (e.data.size) audioChunks.push(e.data); });
+  mediaRecorder.start(250);  // deliver chunks every 250ms so we always have data on stop
+  dictateBtn.classList.add('recording');
+  setDictateStatus('Recording… tap 🎤 to stop');
+}
+
+async function stopDictation() {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  const mr = mediaRecorder;
+  mediaRecorder = null;
+  dictateBtn.classList.remove('recording');
+
+  // Collect final chunk then stop
+  await new Promise(resolve => {
+    mr.addEventListener('dataavailable', e => { if (e.data.size) audioChunks.push(e.data); });
+    mr.addEventListener('stop', resolve, { once: true });
+    if (mr.state === 'recording') mr.stop();
+    else resolve();
+  });
+  mr.stream.getTracks().forEach(t => t.stop());
+
+  const mimeType = mr.mimeType || 'audio/webm';
+  const blob = new Blob(audioChunks, { type: mimeType });
+  console.log('dictate: blob size', blob.size, 'type', mimeType);
+
+  if (blob.size < 1000) {
+    setDictateStatus('');
+    toast('Recording too short or no audio captured.', 'error');
+    return;
+  }
+
+  const form = new FormData();
+  form.append('audio', blob, 'dictation.webm');
+  setDictateStatus(`Transcribing… (${(blob.size / 1024).toFixed(0)} KB)`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 90000);
+  try {
+    const data = await apiFetch('/api/journal/dictate', { method: 'POST', body: form, signal: controller.signal });
+    clearTimeout(timeoutId);
+    setDictateStatus('');
+    await loadNotes();
+    await loadSidebar();
+    await openNote(data.id);
+  } catch (e) {
+    clearTimeout(timeoutId);
+    setDictateStatus('');
+    toast('Dictation failed: ' + (e.name === 'AbortError' ? 'timed out after 90s' : e.message), 'error');
+  }
+}
+
+dictateBtn.addEventListener('click', () => {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    stopDictation();
+  } else {
+    startDictation();
+  }
+});
+
 // ── Event bindings ─────────────────────────────────────────────────────────
 
 $('btn-new-note').addEventListener('click', () => {
@@ -920,6 +1004,10 @@ function formatBytes(n) {
 async function init() {
   await loadNotes();
   await loadSidebar();
+  apiFetch('/api/version').then(d => {
+    const el = $('build-number');
+    if (el) el.textContent = 'build ' + d.version;
+  }).catch(() => {});
 
   // Check for ?note=<id> from share redirect
   const params = new URLSearchParams(location.search);
