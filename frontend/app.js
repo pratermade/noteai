@@ -1043,6 +1043,8 @@ function renderJournalReminderTimes(times) {
   for (const t of times) journalReminderList.appendChild(_makeTimeRow(t));
 }
 
+let _loadedTgCredentials = {};
+
 async function loadSettings() {
   try {
     const data = await apiFetch('/api/settings');
@@ -1054,6 +1056,14 @@ async function loadSettings() {
     $('tg-rag-url').value           = data.telegram_rag_url || '';
     $('tg-rag-model').value         = data.telegram_rag_model || '';
     $('tg-max-history').value       = data.telegram_max_history || '';
+    _loadedTgCredentials = {
+      token:   data.telegram_bot_token || '',
+      users:   (data.telegram_allowed_users || []).join(', '),
+      chatId:  String(data.telegram_reminder_chat_id || ''),
+      ragUrl:  data.telegram_rag_url || '',
+      ragModel: data.telegram_rag_model || '',
+      maxHist: String(data.telegram_max_history || ''),
+    };
   } catch (e) {
     console.warn('loadSettings failed', e);
   }
@@ -1102,7 +1112,27 @@ $('btn-settings-save').addEventListener('click', async () => {
       body: JSON.stringify(payload),
     });
     renderReminderTimes(data.reminder_times);
-    toast('Settings saved. Restart the Telegram bot to apply changes.', 'success');
+    renderJournalReminderTimes(data.journal_reminder_times || []);
+    const credChanged =
+      $('tg-bot-token').value.trim()       !== _loadedTgCredentials.token   ||
+      $('tg-allowed-users').value.trim()   !== _loadedTgCredentials.users   ||
+      $('tg-reminder-chat-id').value.trim()!== _loadedTgCredentials.chatId  ||
+      $('tg-rag-url').value.trim()         !== _loadedTgCredentials.ragUrl  ||
+      $('tg-rag-model').value.trim()       !== _loadedTgCredentials.ragModel ||
+      $('tg-max-history').value.trim()     !== _loadedTgCredentials.maxHist;
+    const msg = credChanged
+      ? 'Settings saved. Restart the Telegram bot container for credential changes to take effect.'
+      : 'Settings saved. Reminder schedules update automatically within 30 minutes.';
+    toast(msg, 'success');
+    // Update snapshot so subsequent saves compare against new values
+    _loadedTgCredentials = {
+      token:    $('tg-bot-token').value.trim(),
+      users:    $('tg-allowed-users').value.trim(),
+      chatId:   $('tg-reminder-chat-id').value.trim(),
+      ragUrl:   $('tg-rag-url').value.trim(),
+      ragModel: $('tg-rag-model').value.trim(),
+      maxHist:  $('tg-max-history').value.trim(),
+    };
   } catch (e) {
     toast('Save failed: ' + e.message, 'error');
   }
