@@ -32,7 +32,6 @@ from .telegram_config import (
     TELEGRAM_RAG_MODEL,
     TELEGRAM_RAG_URL,
     TELEGRAM_REMINDER_CHAT_ID,
-    TELEGRAM_REMINDER_HOURS,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -255,7 +254,7 @@ async def _get_reminder_times() -> list[tuple[int, int]]:
                 return [(int(h.strip()), 0) for h in row[0].split(",") if h.strip()]
     except Exception as exc:
         logger.warning("Could not read reminder times from DB, using env default: %s", exc)
-    return [(h, 0) for h in TELEGRAM_REMINDER_HOURS]
+    return []
 
 
 async def _get_journal_reminder_times() -> list[tuple[int, int]]:
