@@ -22,13 +22,25 @@ self.addEventListener('activate', event => {
   self.clients.claim();
 });
 
+const NETWORK_FIRST = ['/', '/app.js', '/style.css'];
+
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
-  // API calls and manifest: always go to network, never cache
-  if (url.pathname.startsWith('/api/') || url.pathname === '/manifest.json') {
+  if (url.pathname.startsWith('/api/') || url.pathname === '/manifest.json') return;
+
+  if (NETWORK_FIRST.some(p => url.pathname === p)) {
+    event.respondWith(
+      fetch(event.request)
+        .then(res => {
+          const clone = res.clone();
+          caches.open(STATIC_CACHE).then(c => c.put(event.request, clone));
+          return res;
+        })
+        .catch(() => caches.match(event.request))
+    );
     return;
   }
-  // Static assets: cache-first, fall back to network
+
   event.respondWith(
     caches.match(event.request).then(cached => cached || fetch(event.request))
   );
