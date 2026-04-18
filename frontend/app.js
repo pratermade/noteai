@@ -1003,6 +1003,7 @@ function formatBytes(n) {
 
 const settingsView   = $('settings-view');
 const reminderList   = $('reminder-times-list');
+const journalReminderList = $('journal-reminder-times-list');
 
 function showSettingsView() {
   noteListPanel.style.display   = 'none';
@@ -1037,10 +1038,16 @@ function renderReminderTimes(times) {
   for (const t of times) reminderList.appendChild(_makeTimeRow(t));
 }
 
+function renderJournalReminderTimes(times) {
+  journalReminderList.innerHTML = '';
+  for (const t of times) journalReminderList.appendChild(_makeTimeRow(t));
+}
+
 async function loadSettings() {
   try {
     const data = await apiFetch('/api/settings');
     renderReminderTimes(data.reminder_times);
+    renderJournalReminderTimes(data.journal_reminder_times || []);
     $('tg-bot-token').value         = data.telegram_bot_token || '';
     $('tg-allowed-users').value     = (data.telegram_allowed_users || []).join(', ');
     $('tg-reminder-chat-id').value  = data.telegram_reminder_chat_id || '';
@@ -1056,9 +1063,15 @@ $('btn-add-reminder-time').addEventListener('click', () => {
   reminderList.appendChild(_makeTimeRow());
 });
 
+$('btn-add-journal-time').addEventListener('click', () => {
+  journalReminderList.appendChild(_makeTimeRow());
+});
+
 $('btn-settings-save').addEventListener('click', async () => {
   const inputs = reminderList.querySelectorAll('input[type=time]');
   const times = [...inputs].map(i => i.value).filter(Boolean);
+  const journalInputs = journalReminderList.querySelectorAll('input[type=time]');
+  const journalTimes = [...journalInputs].map(i => i.value).filter(Boolean);
 
   const allowedRaw = $('tg-allowed-users').value;
   const allowed = allowedRaw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
@@ -1071,6 +1084,7 @@ $('btn-settings-save').addEventListener('click', async () => {
 
   const payload = {
     reminder_times: times,
+    journal_reminder_times: journalTimes,
     telegram_bot_token: $('tg-bot-token').value.trim() || undefined,
     telegram_allowed_users: allowed,
     telegram_reminder_chat_id: chatId || undefined,
@@ -1091,6 +1105,21 @@ $('btn-settings-save').addEventListener('click', async () => {
     toast('Settings saved. Restart the Telegram bot to apply changes.', 'success');
   } catch (e) {
     toast('Save failed: ' + e.message, 'error');
+  }
+});
+
+$('btn-test-telegram').addEventListener('click', async () => {
+  const btn = $('btn-test-telegram');
+  btn.disabled = true;
+  btn.textContent = 'Testing…';
+  try {
+    await apiFetch('/api/settings/test-telegram', { method: 'POST' });
+    toast('Telegram connected! Check your chat for the test message.', 'success');
+  } catch (e) {
+    toast('Test failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Test Connection';
   }
 });
 

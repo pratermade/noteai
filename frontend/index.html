@@ -137,6 +137,12 @@
         <button id="btn-add-reminder-time" class="btn-add-time">+ Add time</button>
       </section>
       <section class="settings-section">
+        <h2>Journal Reminders</h2>
+        <p class="settings-hint">Times to check if a journal entry has been written today. If not, the bot sends a friendly nudge.</p>
+        <div id="journal-reminder-times-list"></div>
+        <button id="btn-add-journal-time" class="btn-add-time">+ Add time</button>
+      </section>
+      <section class="settings-section">
         <h2>Telegram Bot</h2>
         <p class="settings-hint">Restart the Telegram bot after saving for changes to take effect.</p>
         <div class="settings-fields">
@@ -164,6 +170,9 @@
             <label>Max Conversation History</label>
             <input id="tg-max-history" type="number" min="1" max="100" placeholder="20" />
           </div>
+        </div>
+        <div class="settings-section-footer">
+          <button id="btn-test-telegram" class="btn-secondary">Test Connection</button>
         </div>
       </section>
       <div class="settings-actions">

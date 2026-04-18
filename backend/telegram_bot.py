@@ -237,6 +237,89 @@ async def _get_reminder_times() -> list[tuple[int, int]]:
     return [(h, 0) for h in TELEGRAM_REMINDER_HOURS]
 
 
+async def _get_journal_reminder_times() -> list[tuple[int, int]]:
+    """Return configured journal reminder times from DB. Empty list = user hasn't opted in."""
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
+                "SELECT value FROM app_settings WHERE key = 'journal_reminder_times'"
+            ) as cur:
+                row = await cur.fetchone()
+            if row and row[0].strip():
+                result = []
+                for t in row[0].split(","):
+                    t = t.strip()
+                    if ":" in t:
+                        h, m = t.split(":", 1)
+                        result.append((int(h), int(m)))
+                return result
+    except Exception as exc:
+        logger.warning("Could not read journal_reminder_times from DB: %s", exc)
+    return []
+
+
+async def _check_and_send_journal_reminder(bot) -> None:
+    """Check if a journal entry exists for today; nudge the user if not."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            async with conn.execute(
+                "SELECT COUNT(*) FROM notes WHERE folder = 'Journal' AND substr(created_at, 1, 10) = ?",
+                (today,),
+            ) as cur:
+                row = await cur.fetchone()
+                count = row[0] if row else 0
+    except Exception as exc:
+        logger.error("Journal check failed: %s", exc)
+        return
+
+    if count > 0:
+        logger.info("Journal entry exists for %s — skipping reminder", today)
+        return
+
+    logger.info("No journal entry for %s — sending reminder", today)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are the user's personal AI assistant — warm, witty, and just a little persistent. "
+                "The user has not written a journal entry today. "
+                "Write a short, genuine nudge (2-3 sentences, under 100 words) encouraging them to "
+                "take a few minutes and reflect on their day. "
+                "Be conversational and a touch playful. No bullet points, no markdown, no headers."
+            ),
+        },
+        {"role": "user", "content": "Remind me to write my journal entry for today."},
+    ]
+    try:
+        response = await query_rag(messages)
+        await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text=response)
+    except Exception as exc:
+        logger.error("Journal reminder send failed: %s", exc)
+
+
+async def _reschedule_journal_reminders(bot) -> None:
+    """Read journal reminder times from DB and rebuild per-time cron jobs."""
+    if _scheduler is None:
+        return
+    for job in _scheduler.get_jobs():
+        if job.id.startswith("journal_") and job.id != "journal_manager":
+            _scheduler.remove_job(job.id)
+
+    times = await _get_journal_reminder_times()
+    for h, m in times:
+        job_id = f"journal_{h:02d}{m:02d}"
+        _scheduler.add_job(
+            _check_and_send_journal_reminder,
+            CronTrigger(hour=h, minute=m),
+            args=[bot],
+            id=job_id,
+            replace_existing=True,
+        )
+    logger.info("Journal reminders rescheduled: %s", [f"{h:02d}:{m:02d}" for h, m in times])
+
+
 async def _reschedule_reminders(bot) -> None:
     """Read current reminder times from DB and rebuild the per-time cron jobs."""
     if _scheduler is None:
@@ -261,7 +344,6 @@ async def _reschedule_reminders(bot) -> None:
 async def post_init(application) -> None:
     global _scheduler
     _scheduler = AsyncIOScheduler()
-    # Management job: re-reads DB every 30 min and reschedules precise-time jobs
     _scheduler.add_job(
         _reschedule_reminders,
         CronTrigger(minute="0,30"),
@@ -269,9 +351,16 @@ async def post_init(application) -> None:
         id="reminder_manager",
         replace_existing=True,
     )
+    _scheduler.add_job(
+        _reschedule_journal_reminders,
+        CronTrigger(minute="0,30"),
+        args=[application.bot],
+        id="journal_manager",
+        replace_existing=True,
+    )
     _scheduler.start()
-    # Populate the actual per-time jobs immediately at startup
     await _reschedule_reminders(application.bot)
+    await _reschedule_journal_reminders(application.bot)
     logger.info("Reminder scheduler started")
 
 

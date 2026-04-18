@@ -110,6 +110,7 @@ class SearchResult(BaseModel):
 
 class SettingsPatch(BaseModel):
     reminder_times: list[str] | None = None
+    journal_reminder_times: list[str] | None = None
     telegram_bot_token: str | None = None
     telegram_allowed_users: list[int] | None = None
     telegram_reminder_chat_id: int | None = None
@@ -120,6 +121,7 @@ class SettingsPatch(BaseModel):
 
 class SettingsResponse(BaseModel):
     reminder_times: list[str]
+    journal_reminder_times: list[str]
     telegram_bot_token: str
     telegram_allowed_users: list[int]
     telegram_reminder_chat_id: int
