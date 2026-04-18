@@ -24,6 +24,12 @@ uvicorn backend.main:app \
     --log-level info &
 MAIN_PID=$!
 
+# Start Telegram bot if token is configured
+if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    echo "Starting Telegram bot..."
+    python -m backend.telegram_bot &
+fi
+
 # Start RAG chat API (exec so it receives signals directly)
 exec uvicorn backend.chat_api:app \
     --host 0.0.0.0 \
