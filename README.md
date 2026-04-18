@@ -5,7 +5,8 @@ A self-hosted note-keeping PWA with automatic RAG pipeline. Notes, PDFs, and web
 ## Features
 
 - **Four note types**: `markdown` (plain notes), `attachment` (PDF), `url` (web page), `video` (YouTube — embeds player and indexes transcript)
-- **Nine folders** — fixed categories (Unfiled, Reference, Ideas, Todo, Review Later, Project, Journal, Resources, Archive) to keep notes organized; Archive is excluded from search and RAG by default
+- **Nine folders** — fixed categories (Unfiled, Reference, Ideas, Todo, Review Later, Projects, Journal, Resources, Archive) to keep notes organized; Archive is excluded from search and RAG by default
+- **Voice dictation** — tap the 🎤 button to record a journal entry; the audio is transcribed by a local Whisper server and automatically rewritten into a structured, clinical journal format via the LLM pipeline
 - **Semantic search** across notes and attachment content
 - **LLM summaries** — auto-generated 50-word summary for every note and attachment
 - **RAG chat API** — OpenAI-compatible `/v1/chat/completions` endpoint (port 8084) that answers questions grounded in your notes, with intent-based folder routing (e.g. "what should I work on?" searches only Todo notes) and daily reminder injection
@@ -17,9 +18,11 @@ A self-hosted note-keeping PWA with automatic RAG pipeline. Notes, PDFs, and web
 ## Prerequisites
 
 - Python 3.11+
+- **ffmpeg** — required for voice dictation audio conversion (WebM/Opus → PCM)
 - A running **ChromaDB** HTTP service
 - A local **embedding model server** exposing an OpenAI-compatible `/v1/embeddings` endpoint (e.g. [Ollama](https://ollama.com), [llama.cpp](https://github.com/ggerganov/llama.cpp), [text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference))
 - _(Optional)_ An OpenAI-compatible `/v1/chat/completions` endpoint for LLM summaries (e.g. Ollama). Without it, summaries fall back to text truncation.
+- _(Optional)_ A **Wyoming faster-whisper** server for voice dictation (e.g. `wyoming-faster-whisper --uri tcp://0.0.0.0:10300 --model base`). Without it, the 🎤 dictation button will not function.
 
 ## Docker (recommended)
 
@@ -71,6 +74,7 @@ uvicorn backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem --host 0.
 | `CHAT_LLM_MODEL` | _(falls back to `SUMMARY_MODEL`)_ | Model name for the RAG chat API |
 | `CHAT_N_RESULTS` | `8` | Note chunks injected as RAG context per chat request |
 | `CHAT_PORT` | `8084` | Port for the RAG chat API service |
+| `WHISPER_BASE_URL` | `http://localhost:10300` | Wyoming faster-whisper TCP server address used for voice dictation |
 
 ## How the RAG pipeline works
 
@@ -105,6 +109,24 @@ Each request:
 4. Prepends any overdue or due-today reminders to the system prompt on every request
 
 Streaming (`"stream": true`) is supported. The chat API shares the same embedding and vector store configuration as the main app.
+
+## Voice Dictation (Journal)
+
+Tap the 🎤 button in the search bar to record a voice journal entry. When you tap again to stop, the audio is:
+
+1. Sent to the backend as a WebM/Opus blob
+2. Converted to 16 kHz mono PCM via ffmpeg
+3. Transcribed by the Wyoming faster-whisper TCP server (`WHISPER_BASE_URL`)
+4. Rewritten by the LLM into a structured journal entry with **Time** and **Activities** bullet points
+5. Saved as a new note in the Journal folder and opened automatically
+
+The Wyoming server must be running and reachable at `WHISPER_BASE_URL` (default `http://localhost:10300`). Example launch:
+
+```bash
+wyoming-faster-whisper --uri tcp://0.0.0.0:10300 --model base --language en
+```
+
+If the recording is too short or produces no audio, the frontend shows an error immediately without sending a request.
 
 ## HTTPS for Android PWA
 
