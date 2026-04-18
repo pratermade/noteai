@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime
 from functools import wraps
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiosqlite
 import httpx
@@ -208,6 +210,25 @@ async def send_scheduled_reminder(bot) -> None:
         logger.error("Scheduled reminder failed: %s", exc)
 
 
+async def _get_timezone() -> ZoneInfo | None:
+    """Read server_timezone from DB (or TZ env var) and return a ZoneInfo, or None for system local."""
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
+                "SELECT value FROM app_settings WHERE key = 'server_timezone'"
+            ) as cur:
+                row = await cur.fetchone()
+            tz_str = (row[0].strip() if row and row[0] else "") or os.environ.get("TZ", "")
+        if tz_str:
+            return ZoneInfo(tz_str)
+    except ZoneInfoNotFoundError as exc:
+        logger.warning("Unknown timezone '%s', falling back to system local: %s", exc, exc)
+    except Exception as exc:
+        logger.warning("Could not read server_timezone: %s", exc)
+    return None
+
+
 async def _get_reminder_times() -> list[tuple[int, int]]:
     """Return configured reminder times as (hour, minute) tuples from the DB."""
     try:
@@ -308,16 +329,17 @@ async def _reschedule_journal_reminders(bot) -> None:
             _scheduler.remove_job(job.id)
 
     times = await _get_journal_reminder_times()
+    tz = await _get_timezone()
     for h, m in times:
         job_id = f"journal_{h:02d}{m:02d}"
         _scheduler.add_job(
             _check_and_send_journal_reminder,
-            CronTrigger(hour=h, minute=m),
+            CronTrigger(hour=h, minute=m, timezone=tz),
             args=[bot],
             id=job_id,
             replace_existing=True,
         )
-    logger.info("Journal reminders rescheduled: %s", [f"{h:02d}:{m:02d}" for h, m in times])
+    logger.info("Journal reminders rescheduled: %s (tz=%s)", [f"{h:02d}:{m:02d}" for h, m in times], tz)
 
 
 async def _reschedule_reminders(bot) -> None:
@@ -329,31 +351,33 @@ async def _reschedule_reminders(bot) -> None:
             _scheduler.remove_job(job.id)
 
     times = await _get_reminder_times()
+    tz = await _get_timezone()
     for h, m in times:
         job_id = f"reminder_{h:02d}{m:02d}"
         _scheduler.add_job(
             send_scheduled_reminder,
-            CronTrigger(hour=h, minute=m),
+            CronTrigger(hour=h, minute=m, timezone=tz),
             args=[bot],
             id=job_id,
             replace_existing=True,
         )
-    logger.info("Reminders rescheduled: %s", [f"{h:02d}:{m:02d}" for h, m in times])
+    logger.info("Reminders rescheduled: %s (tz=%s)", [f"{h:02d}:{m:02d}" for h, m in times], tz)
 
 
 async def post_init(application) -> None:
     global _scheduler
     _scheduler = AsyncIOScheduler()
+    tz = await _get_timezone()
     _scheduler.add_job(
         _reschedule_reminders,
-        CronTrigger(minute="0,30"),
+        CronTrigger(minute="0,30", timezone=tz),
         args=[application.bot],
         id="reminder_manager",
         replace_existing=True,
     )
     _scheduler.add_job(
         _reschedule_journal_reminders,
-        CronTrigger(minute="0,30"),
+        CronTrigger(minute="0,30", timezone=tz),
         args=[application.bot],
         id="journal_manager",
         replace_existing=True,
@@ -361,7 +385,7 @@ async def post_init(application) -> None:
     _scheduler.start()
     await _reschedule_reminders(application.bot)
     await _reschedule_journal_reminders(application.bot)
-    logger.info("Reminder scheduler started")
+    logger.info("Reminder scheduler started (tz=%s)", tz)
 
 
 # ---------------------------------------------------------------------------

@@ -1056,7 +1056,9 @@ async function loadSettings() {
     $('tg-rag-url').value           = data.telegram_rag_url || '';
     $('tg-rag-model').value         = data.telegram_rag_model || '';
     $('tg-max-history').value       = data.telegram_max_history || '';
+    $('server-timezone').value = data.server_timezone || '';
     _loadedTgCredentials = {
+      tz:      data.server_timezone || '',
       token:   data.telegram_bot_token || '',
       users:   (data.telegram_allowed_users || []).join(', '),
       chatId:  String(data.telegram_reminder_chat_id || ''),
@@ -1093,6 +1095,7 @@ $('btn-settings-save').addEventListener('click', async () => {
   const maxHist = maxHistRaw ? parseInt(maxHistRaw, 10) : 20;
 
   const payload = {
+    server_timezone: $('server-timezone').value.trim() || undefined,
     reminder_times: times,
     journal_reminder_times: journalTimes,
     telegram_bot_token: $('tg-bot-token').value.trim() || undefined,
@@ -1114,6 +1117,7 @@ $('btn-settings-save').addEventListener('click', async () => {
     renderReminderTimes(data.reminder_times);
     renderJournalReminderTimes(data.journal_reminder_times || []);
     const credChanged =
+      $('server-timezone').value.trim()    !== _loadedTgCredentials.tz      ||
       $('tg-bot-token').value.trim()       !== _loadedTgCredentials.token   ||
       $('tg-allowed-users').value.trim()   !== _loadedTgCredentials.users   ||
       $('tg-reminder-chat-id').value.trim()!== _loadedTgCredentials.chatId  ||
@@ -1126,6 +1130,7 @@ $('btn-settings-save').addEventListener('click', async () => {
     toast(msg, 'success');
     // Update snapshot so subsequent saves compare against new values
     _loadedTgCredentials = {
+      tz:       $('server-timezone').value.trim(),
       token:    $('tg-bot-token').value.trim(),
       users:    $('tg-allowed-users').value.trim(),
       chatId:   $('tg-reminder-chat-id').value.trim(),

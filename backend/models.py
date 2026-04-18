@@ -109,6 +109,7 @@ class SearchResult(BaseModel):
 
 
 class SettingsPatch(BaseModel):
+    server_timezone: str | None = None
     reminder_times: list[str] | None = None
     journal_reminder_times: list[str] | None = None
     telegram_bot_token: str | None = None
@@ -120,6 +121,7 @@ class SettingsPatch(BaseModel):
 
 
 class SettingsResponse(BaseModel):
+    server_timezone: str
     reminder_times: list[str]
     journal_reminder_times: list[str]
     telegram_bot_token: str

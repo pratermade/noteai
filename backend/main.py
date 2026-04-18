@@ -975,7 +975,10 @@ async def _build_settings_response(conn) -> SettingsResponse:
     journal_raw = await db.get_setting(conn, "journal_reminder_times")
     journal_times = _parse_times(journal_raw) if journal_raw else []
 
+    tz = await db.get_setting(conn, "server_timezone") or os.environ.get("TZ", "")
+
     return SettingsResponse(
+        server_timezone=tz,
         reminder_times=times,
         journal_reminder_times=journal_times,
         telegram_bot_token=await _get("telegram_bot_token", "TELEGRAM_BOT_TOKEN", ""),
@@ -1004,6 +1007,8 @@ def _validate_times(times: list[str], label: str) -> None:
 
 @app.patch("/api/settings", response_model=SettingsResponse)
 async def update_settings(body: SettingsPatch, conn: DB):
+    if body.server_timezone is not None:
+        await db.set_setting(conn, "server_timezone", body.server_timezone)
     if body.reminder_times is not None:
         _validate_times(body.reminder_times, "Reminder times")
         await db.set_setting(conn, "reminder_times", ",".join(body.reminder_times))
