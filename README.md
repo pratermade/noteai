@@ -14,6 +14,7 @@ A self-hosted note-keeping PWA with automatic RAG pipeline. Notes, PDFs, and web
 - **Next Tasks panel** — sidebar shortcut listing the next 10 notes with due dates ordered soonest first; inline checkboxes mark tasks complete without leaving the view
 - **Android PWA** — installable, with share-target support (share URLs, text, and PDFs directly from Chrome)
 - **Markdown preview** with edit/preview toggle
+- **Telegram bot** — conversational RAG over your notes via Telegram; sends scheduled task reminders and journal nudges at configurable times; bot credentials and reminder schedules managed entirely from the web UI (no `.env` edits required)
 
 ## Prerequisites
 
@@ -158,6 +159,39 @@ Install the mkcert root CA on your Android device to trust the certificate.
 1. Open the app URL in Chrome on your Android device.
 2. Tap the three-dot menu → **Add to Home Screen**.
 3. Once installed, NoterAI appears in the Android share sheet — you can share URLs, text, and PDFs directly from any app.
+
+## Telegram Bot
+
+NoterAI includes an optional Telegram bot that connects to the RAG chat API so you can query your notes from your phone.
+
+### Setup
+
+1. Create a bot via [@BotFather](https://t.me/botfather) and copy the token.
+2. Open **Settings** in the web UI and fill in the **Telegram Bot** section:
+   - **Bot Token** — token from BotFather
+   - **Allowed User IDs** — your Telegram numeric user ID (use `/chatid` in the bot once it's running, or check [@userinfobot](https://t.me/userinfobot))
+   - **Reminder Chat ID** — the chat where reminders are sent (usually your own user ID)
+   - **RAG API URL** — URL of the RAG chat service (default `http://localhost:8084`)
+3. Click **Test Connection** to verify the token is valid, then **Save Settings**.
+4. Restart the container (`bash update.sh`) to pick up the new credentials.
+
+### Bot commands
+
+| Command | Description |
+|---|---|
+| `/start` | Show help |
+| `/clear` | Reset conversation history |
+| `/status` | Check RAG API health |
+| `/chatid` | Show your chat ID |
+| `/remind` | Trigger a task reminder immediately (for testing) |
+
+### Scheduled reminders
+
+Configure reminder times in **Settings → Telegram Reminders**. At each time, the bot queries the RAG API for overdue/due-today tasks and sends a concise summary to the reminder chat.
+
+Configure journal check times in **Settings → Journal Reminders**. At each time, the bot checks whether a journal entry exists for today. If not, it sends a friendly AI-generated nudge to write one.
+
+Times are interpreted in the **Server Timezone** configured under **Settings → System**. Set it to your local IANA timezone (e.g. `America/Chicago`) so reminders fire at the correct local time. The scheduler re-reads the database every 30 minutes, so reminder time changes take effect without a restart; credential changes require a restart.
 
 ## API examples
 
