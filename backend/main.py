@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 
@@ -927,28 +928,47 @@ async def reindex_status(job_id: str | None = Query(default=None)):
 # Settings
 # ---------------------------------------------------------------------------
 
-_DEFAULT_REMINDER_HOURS = "8,14"
+_DEFAULT_REMINDER_TIMES = "08:00,14:00"
+_TIME_RE = re.compile(r"^(\d{2}):(\d{2})$")
 
 
-def _parse_hours(s: str) -> list[int]:
-    return [int(h.strip()) for h in s.split(",") if h.strip()]
+def _parse_times(s: str) -> list[str]:
+    return [t.strip() for t in s.split(",") if t.strip()]
+
+
+async def _read_reminder_times(conn) -> list[str]:
+    """Return current reminder_times, migrating legacy reminder_hours if needed."""
+    raw = await db.get_setting(conn, "reminder_times")
+    if raw is not None:
+        return _parse_times(raw)
+    # Migrate legacy hour-only setting
+    legacy = await db.get_setting(conn, "reminder_hours")
+    if legacy:
+        migrated = ",".join(f"{int(h.strip()):02d}:00" for h in legacy.split(",") if h.strip())
+        await db.set_setting(conn, "reminder_times", migrated)
+        return _parse_times(migrated)
+    return _parse_times(_DEFAULT_REMINDER_TIMES)
 
 
 @app.get("/api/settings", response_model=SettingsResponse)
 async def get_settings(conn: DB):
-    raw = await db.get_setting(conn, "reminder_hours", _DEFAULT_REMINDER_HOURS)
-    return SettingsResponse(reminder_hours=_parse_hours(raw))
+    times = await _read_reminder_times(conn)
+    return SettingsResponse(reminder_times=times)
 
 
 @app.patch("/api/settings", response_model=SettingsResponse)
 async def update_settings(body: SettingsPatch, conn: DB):
-    if body.reminder_hours is not None:
-        for h in body.reminder_hours:
-            if not (0 <= h <= 23):
-                raise HTTPException(status_code=422, detail=f"Hour {h} out of range 0-23")
-        await db.set_setting(conn, "reminder_hours", ",".join(str(h) for h in body.reminder_hours))
-    raw = await db.get_setting(conn, "reminder_hours", _DEFAULT_REMINDER_HOURS)
-    return SettingsResponse(reminder_hours=_parse_hours(raw))
+    if body.reminder_times is not None:
+        for t in body.reminder_times:
+            m = _TIME_RE.fullmatch(t)
+            if not m:
+                raise HTTPException(status_code=422, detail=f"Invalid time '{t}' — use HH:MM")
+            h, mn = int(m.group(1)), int(m.group(2))
+            if not (0 <= h <= 23 and 0 <= mn <= 59):
+                raise HTTPException(status_code=422, detail=f"Time '{t}' out of range")
+        await db.set_setting(conn, "reminder_times", ",".join(body.reminder_times))
+    times = await _read_reminder_times(conn)
+    return SettingsResponse(reminder_times=times)
 
 
 # ---------------------------------------------------------------------------
