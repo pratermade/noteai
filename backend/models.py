@@ -108,6 +108,14 @@ class SearchResult(BaseModel):
     attachment_summary: str | None = None
 
 
+class SettingsPatch(BaseModel):
+    reminder_hours: list[int] | None = None
+
+
+class SettingsResponse(BaseModel):
+    reminder_hours: list[int]
+
+
 class ReindexJob(BaseModel):
     job_id: str
     status: Literal["running", "completed", "completed_with_errors", "failed"]

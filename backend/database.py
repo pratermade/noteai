@@ -69,6 +69,14 @@ async def init_db(db: aiosqlite.Connection) -> None:
     if any(c not in note_cols for c in ("note_type", "note_summary", "reminder_at", "reminder_done")):
         await db.commit()
 
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    await db.commit()
+
 
 def _row_to_note(row: aiosqlite.Row) -> NoteResponse:
     return NoteResponse(
@@ -283,6 +291,21 @@ async def get_attachment_extracted_text(db: aiosqlite.Connection, att_id: str) -
     ) as cur:
         row = await cur.fetchone()
     return row[0] if row else None
+
+
+async def get_setting(db: aiosqlite.Connection, key: str, default: str | None = None) -> str | None:
+    async with db.execute("SELECT value FROM app_settings WHERE key = ?", (key,)) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else default
+
+
+async def set_setting(db: aiosqlite.Connection, key: str, value: str) -> None:
+    await db.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    await db.commit()
 
 
 async def list_indexed_attachments(db: aiosqlite.Connection,

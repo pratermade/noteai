@@ -999,11 +999,51 @@ function formatBytes(n) {
   return (n/1048576).toFixed(1) + ' MB';
 }
 
+// ── Settings ───────────────────────────────────────────────────────────────
+
+const settingsPanel = $('settings-panel');
+const settingsHoursInput = $('settings-reminder-hours');
+
+$('btn-settings-toggle').addEventListener('click', () => {
+  const open = settingsPanel.style.display !== 'none';
+  settingsPanel.style.display = open ? 'none' : 'block';
+});
+
+async function loadSettings() {
+  try {
+    const data = await apiFetch('/api/settings');
+    settingsHoursInput.value = data.reminder_hours.join(', ');
+  } catch (e) {
+    console.warn('loadSettings failed', e);
+  }
+}
+
+$('btn-settings-save').addEventListener('click', async () => {
+  const raw = settingsHoursInput.value;
+  const hours = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+  if (hours.some(h => h < 0 || h > 23)) {
+    toast('Hours must be between 0 and 23.', 'error');
+    return;
+  }
+  try {
+    const data = await apiFetch('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reminder_hours: hours }),
+    });
+    settingsHoursInput.value = data.reminder_hours.join(', ');
+    toast('Settings saved.', 'success');
+  } catch (e) {
+    toast('Save failed: ' + e.message, 'error');
+  }
+});
+
 // ── Init ───────────────────────────────────────────────────────────────────
 
 async function init() {
   await loadNotes();
   await loadSidebar();
+  await loadSettings();
   apiFetch('/api/version').then(d => {
     const el = $('build-number');
     if (el) el.textContent = 'build ' + d.version;

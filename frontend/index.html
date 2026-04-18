@@ -31,6 +31,14 @@
   <div id="sidebar-footer">
     <button id="reindex-all-btn">Reindex all notes</button>
     <div id="reindex-progress" style="display:none"></div>
+    <button id="btn-settings-toggle">⚙ Settings</button>
+    <div id="settings-panel" style="display:none">
+      <label class="settings-label">Reminder hours (0–23, comma-separated)</label>
+      <div class="settings-row">
+        <input id="settings-reminder-hours" type="text" placeholder="e.g. 8,14" />
+        <button id="btn-settings-save">Save</button>
+      </div>
+    </div>
     <div id="build-number"></div>
   </div>
 </aside>
