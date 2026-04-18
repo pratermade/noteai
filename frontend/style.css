@@ -280,6 +280,24 @@ body {
   outline: none;
   border-color: var(--accent);
 }
+.settings-section-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+.btn-secondary {
+  padding: 6px 14px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+.btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+.btn-secondary:disabled { opacity: 0.6; cursor: default; }
 .settings-actions {
   display: flex;
   justify-content: flex-end;

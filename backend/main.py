@@ -972,8 +972,12 @@ async def _build_settings_response(conn) -> SettingsResponse:
     max_hist_raw = await _get("telegram_max_history", "TELEGRAM_MAX_HISTORY", "20")
     max_hist = int(max_hist_raw) if max_hist_raw.strip() else 20
 
+    journal_raw = await db.get_setting(conn, "journal_reminder_times")
+    journal_times = _parse_times(journal_raw) if journal_raw else []
+
     return SettingsResponse(
         reminder_times=times,
+        journal_reminder_times=journal_times,
         telegram_bot_token=await _get("telegram_bot_token", "TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_users=allowed,
         telegram_reminder_chat_id=chat_id,
@@ -988,17 +992,24 @@ async def get_settings(conn: DB):
     return await _build_settings_response(conn)
 
 
+def _validate_times(times: list[str], label: str) -> None:
+    for t in times:
+        m = _TIME_RE.fullmatch(t)
+        if not m:
+            raise HTTPException(status_code=422, detail=f"{label}: invalid time '{t}' — use HH:MM")
+        h, mn = int(m.group(1)), int(m.group(2))
+        if not (0 <= h <= 23 and 0 <= mn <= 59):
+            raise HTTPException(status_code=422, detail=f"{label}: time '{t}' out of range")
+
+
 @app.patch("/api/settings", response_model=SettingsResponse)
 async def update_settings(body: SettingsPatch, conn: DB):
     if body.reminder_times is not None:
-        for t in body.reminder_times:
-            m = _TIME_RE.fullmatch(t)
-            if not m:
-                raise HTTPException(status_code=422, detail=f"Invalid time '{t}' — use HH:MM")
-            h, mn = int(m.group(1)), int(m.group(2))
-            if not (0 <= h <= 23 and 0 <= mn <= 59):
-                raise HTTPException(status_code=422, detail=f"Time '{t}' out of range")
+        _validate_times(body.reminder_times, "Reminder times")
         await db.set_setting(conn, "reminder_times", ",".join(body.reminder_times))
+    if body.journal_reminder_times is not None:
+        _validate_times(body.journal_reminder_times, "Journal reminder times")
+        await db.set_setting(conn, "journal_reminder_times", ",".join(body.journal_reminder_times))
     if body.telegram_bot_token is not None:
         await db.set_setting(conn, "telegram_bot_token", body.telegram_bot_token)
     if body.telegram_allowed_users is not None:
@@ -1012,6 +1023,30 @@ async def update_settings(body: SettingsPatch, conn: DB):
     if body.telegram_max_history is not None:
         await db.set_setting(conn, "telegram_max_history", str(body.telegram_max_history))
     return await _build_settings_response(conn)
+
+
+@app.post("/api/settings/test-telegram")
+async def test_telegram(conn: DB):
+    token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
+    chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
+
+    if not token:
+        raise HTTPException(status_code=400, detail="Bot token is not configured")
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="Reminder chat ID is not configured")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": "✅ NoterAI test — Telegram connection is working!"},
+        )
+
+    if resp.status_code != 200:
+        detail = resp.json().get("description", "unknown error")
+        raise HTTPException(status_code=502, detail=f"Telegram API error: {detail}")
+
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
