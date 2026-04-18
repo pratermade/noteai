@@ -109,11 +109,11 @@ class SearchResult(BaseModel):
 
 
 class SettingsPatch(BaseModel):
-    reminder_hours: list[int] | None = None
+    reminder_times: list[str] | None = None
 
 
 class SettingsResponse(BaseModel):
-    reminder_hours: list[int]
+    reminder_times: list[str]
 
 
 class ReindexJob(BaseModel):

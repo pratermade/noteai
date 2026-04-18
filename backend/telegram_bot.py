@@ -208,43 +208,71 @@ async def send_scheduled_reminder(bot) -> None:
         logger.error("Scheduled reminder failed: %s", exc)
 
 
-async def _get_reminder_hours() -> list[int]:
-    """Read configured reminder hours from the DB; fall back to env-var default."""
+async def _get_reminder_times() -> list[tuple[int, int]]:
+    """Return configured reminder times as (hour, minute) tuples from the DB."""
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
+            async with conn.execute(
+                "SELECT value FROM app_settings WHERE key = 'reminder_times'"
+            ) as cur:
+                row = await cur.fetchone()
+            if row:
+                result = []
+                for t in row[0].split(","):
+                    t = t.strip()
+                    if ":" in t:
+                        h, m = t.split(":", 1)
+                        result.append((int(h), int(m)))
+                return result
+            # Fall back to legacy reminder_hours
             async with conn.execute(
                 "SELECT value FROM app_settings WHERE key = 'reminder_hours'"
             ) as cur:
                 row = await cur.fetchone()
             if row:
-                return [int(h.strip()) for h in row[0].split(",") if h.strip()]
+                return [(int(h.strip()), 0) for h in row[0].split(",") if h.strip()]
     except Exception as exc:
-        logger.warning("Could not read reminder_hours from DB, using env default: %s", exc)
-    return TELEGRAM_REMINDER_HOURS
+        logger.warning("Could not read reminder times from DB, using env default: %s", exc)
+    return [(h, 0) for h in TELEGRAM_REMINDER_HOURS]
 
 
-async def _hourly_check(bot) -> None:
-    """Fires every hour at :00; sends a reminder only if the current hour is configured."""
-    hours = await _get_reminder_hours()
-    current_hour = datetime.now().hour
-    logger.info("Hourly reminder check: current_hour=%d, configured=%s", current_hour, hours)
-    if current_hour in hours:
-        await send_scheduled_reminder(bot)
+async def _reschedule_reminders(bot) -> None:
+    """Read current reminder times from DB and rebuild the per-time cron jobs."""
+    if _scheduler is None:
+        return
+    for job in _scheduler.get_jobs():
+        if job.id.startswith("reminder_") and job.id != "reminder_manager":
+            _scheduler.remove_job(job.id)
+
+    times = await _get_reminder_times()
+    for h, m in times:
+        job_id = f"reminder_{h:02d}{m:02d}"
+        _scheduler.add_job(
+            send_scheduled_reminder,
+            CronTrigger(hour=h, minute=m),
+            args=[bot],
+            id=job_id,
+            replace_existing=True,
+        )
+    logger.info("Reminders rescheduled: %s", [f"{h:02d}:{m:02d}" for h, m in times])
 
 
 async def post_init(application) -> None:
     global _scheduler
     _scheduler = AsyncIOScheduler()
+    # Management job: re-reads DB every 30 min and reschedules precise-time jobs
     _scheduler.add_job(
-        _hourly_check,
-        CronTrigger(minute=0),
+        _reschedule_reminders,
+        CronTrigger(minute="0,30"),
         args=[application.bot],
-        id="reminder_check",
+        id="reminder_manager",
         replace_existing=True,
     )
     _scheduler.start()
-    logger.info("Reminder scheduler started (hourly check, configured hours read from DB)")
+    # Populate the actual per-time jobs immediately at startup
+    await _reschedule_reminders(application.bot)
+    logger.info("Reminder scheduler started")
 
 
 # ---------------------------------------------------------------------------

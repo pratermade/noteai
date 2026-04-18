@@ -1001,41 +1001,73 @@ function formatBytes(n) {
 
 // ── Settings ───────────────────────────────────────────────────────────────
 
-const settingsPanel = $('settings-panel');
-const settingsHoursInput = $('settings-reminder-hours');
+const settingsView   = $('settings-view');
+const reminderList   = $('reminder-times-list');
 
-$('btn-settings-toggle').addEventListener('click', () => {
-  const open = settingsPanel.style.display !== 'none';
-  settingsPanel.style.display = open ? 'none' : 'block';
-});
+function showSettingsView() {
+  noteListPanel.style.display   = 'none';
+  editorPanel.style.display     = 'none';
+  $('tasks-panel').style.display = 'none';
+  settingsView.style.display    = 'flex';
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  $('btn-settings').classList.add('active');
+  state.tasksMode = false;
+  closeSidebar();
+}
+
+function _makeTimeRow(value = '') {
+  const row = document.createElement('div');
+  row.className = 'reminder-time-row';
+  const inp = document.createElement('input');
+  inp.type  = 'time';
+  inp.value = value;
+  inp.required = true;
+  const del = document.createElement('button');
+  del.className   = 'btn-remove-time';
+  del.textContent = '×';
+  del.title       = 'Remove';
+  del.addEventListener('click', () => row.remove());
+  row.appendChild(inp);
+  row.appendChild(del);
+  return row;
+}
+
+function renderReminderTimes(times) {
+  reminderList.innerHTML = '';
+  for (const t of times) reminderList.appendChild(_makeTimeRow(t));
+}
 
 async function loadSettings() {
   try {
     const data = await apiFetch('/api/settings');
-    settingsHoursInput.value = data.reminder_hours.join(', ');
+    renderReminderTimes(data.reminder_times);
   } catch (e) {
     console.warn('loadSettings failed', e);
   }
 }
 
+$('btn-add-reminder-time').addEventListener('click', () => {
+  reminderList.appendChild(_makeTimeRow());
+});
+
 $('btn-settings-save').addEventListener('click', async () => {
-  const raw = settingsHoursInput.value;
-  const hours = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
-  if (hours.some(h => h < 0 || h > 23)) {
-    toast('Hours must be between 0 and 23.', 'error');
-    return;
-  }
+  const inputs = reminderList.querySelectorAll('input[type=time]');
+  const times = [...inputs].map(i => i.value).filter(Boolean);
   try {
     const data = await apiFetch('/api/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reminder_hours: hours }),
+      body: JSON.stringify({ reminder_times: times }),
     });
-    settingsHoursInput.value = data.reminder_hours.join(', ');
+    renderReminderTimes(data.reminder_times);
     toast('Settings saved.', 'success');
   } catch (e) {
     toast('Save failed: ' + e.message, 'error');
   }
+});
+
+$('btn-settings').addEventListener('click', () => {
+  showSettingsView();
 });
 
 // ── Init ───────────────────────────────────────────────────────────────────
