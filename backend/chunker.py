@@ -18,18 +18,49 @@ def _detokenize(tokens: list[int]) -> str:
 
 
 def _split_sentences(text: str) -> list[str]:
-    # Simple sentence splitter on punctuation followed by whitespace
     parts = re.split(r'(?<=[.!?])\s+', text.strip())
     return [p for p in parts if p]
+
+
+def _hard_split(tokens: list[int], chunk_size: int, chunk_overlap: int) -> list[list[int]]:
+    """Slice a token list into chunk_size pieces with overlap."""
+    pieces = []
+    start = 0
+    while start < len(tokens):
+        end = start + chunk_size
+        pieces.append(tokens[start:end])
+        if end >= len(tokens):
+            break
+        start = end - chunk_overlap
+    return pieces
+
+
+def _char_split(text: str, max_chars: int) -> list[str]:
+    """Split text at word boundaries to stay within max_chars. Guaranteed: each piece <= max_chars."""
+    if len(text) <= max_chars:
+        return [text]
+    pieces = []
+    while text:
+        if len(text) <= max_chars:
+            pieces.append(text)
+            break
+        cut = text.rfind(' ', 0, max_chars)
+        if cut <= 0:
+            cut = max_chars  # no word boundary — hard cut
+        pieces.append(text[:cut].strip())
+        text = text[cut:].strip()
+    return [p for p in pieces if p]
 
 
 def chunk_text(text: str) -> list[dict]:
     """
     Split text into overlapping chunks.
     Returns list of {"text": str, "chunk_index": int}.
+    Each chunk is guaranteed to be <= chunk_max_chars characters.
     """
     chunk_size = settings.chunk_size
     chunk_overlap = settings.chunk_overlap
+    max_chars = settings.chunk_max_chars
 
     # Split on double newlines (paragraphs)
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
@@ -46,13 +77,23 @@ def chunk_text(text: str) -> list[dict]:
             current: list[str] = []
             current_len = 0
             for sent in sentences:
-                sent_tokens = len(_tokenize(sent))
-                if current_len + sent_tokens > chunk_size and current:
+                sent_toks = _tokenize(sent)
+                sent_len = len(sent_toks)
+                if current_len + sent_len > chunk_size and current:
                     segments.append(" ".join(current))
                     current = []
                     current_len = 0
-                current.append(sent)
-                current_len += sent_tokens
+                if sent_len > chunk_size:
+                    # Sentence exceeds chunk_size with no splittable boundary — hard-split by tokens
+                    if current:
+                        segments.append(" ".join(current))
+                        current = []
+                        current_len = 0
+                    for piece in _hard_split(sent_toks, chunk_size, chunk_overlap):
+                        segments.append(_detokenize(piece))
+                else:
+                    current.append(sent)
+                    current_len += sent_len
             if current:
                 segments.append(" ".join(current))
 
@@ -70,10 +111,7 @@ def chunk_text(text: str) -> list[dict]:
             continue
 
         # Flush accumulated overlap + segment as a chunk
-        if overlap_tokens:
-            chunk_tokens = overlap_tokens + seg_tokens
-        else:
-            chunk_tokens = seg_tokens
+        chunk_tokens = (overlap_tokens + seg_tokens) if overlap_tokens else seg_tokens
 
         # Emit chunks of chunk_size from chunk_tokens
         start = 0
@@ -96,4 +134,14 @@ def chunk_text(text: str) -> list[dict]:
     if not chunks and text.strip():
         chunks.append({"text": text.strip(), "chunk_index": 0})
 
-    return chunks
+    # Hard-limit: enforce character ceiling (tokenizer-agnostic — catches mismatch between
+    # cl100k_base and the embedding model's tokenizer)
+    enforced: list[dict] = []
+    for ch in chunks:
+        if len(ch["text"]) <= max_chars:
+            enforced.append({"text": ch["text"], "chunk_index": len(enforced)})
+        else:
+            for piece in _char_split(ch["text"], max_chars):
+                enforced.append({"text": piece, "chunk_index": len(enforced)})
+
+    return enforced

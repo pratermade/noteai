@@ -75,16 +75,9 @@ def _headers() -> dict:
     return h
 
 
-_last_reminder_date: str | None = None
-
-
-async def _get_daily_reminders() -> tuple[str, list[dict]]:
-    """Return (system_prompt_text, reminders_list) for due reminders on first chat of the day."""
-    global _last_reminder_date
+async def _get_due_reminders() -> tuple[str, list[dict]]:
+    """Return (system_prompt_text, reminders_list) for all due/overdue reminders."""
     today = date.today().isoformat()
-    if today == _last_reminder_date:
-        return "", []
-    _last_reminder_date = today
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
@@ -105,7 +98,7 @@ async def _get_daily_reminders() -> tuple[str, list[dict]]:
         )
         return system_text, items
     except Exception:
-        logger.warning("Failed to fetch daily reminders", exc_info=True)
+        logger.warning("Failed to fetch due reminders", exc_info=True)
         return "", []
 
 
@@ -297,7 +290,7 @@ async def chat_completions(body: ChatRequest):
 
     (context, sources), (reminders_text, reminders_list) = await asyncio.gather(
         _retrieve_context(query) if query else _no_context(),
-        _get_daily_reminders(),
+        _get_due_reminders(),
     )
     reminders_md = _format_reminders_md(reminders_list)
     messages = _build_messages([m.model_dump() for m in body.messages], context, reminders_text)

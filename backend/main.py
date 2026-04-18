@@ -65,6 +65,9 @@ async def lifespan(app: FastAPI):
     ))
     logging.root.setLevel(logging.INFO)
     logging.root.handlers = [handler]
+    # Emit DEBUG for the indexing pipeline without drowning in httpx/chromadb internals
+    for mod in ("backend.main", "backend.embeddings", "backend.vector_store"):
+        logging.getLogger(mod).setLevel(logging.DEBUG)
 
     # Create attachment dir
     ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
@@ -170,66 +173,83 @@ DB = Annotated[aiosqlite.Connection, Depends(get_db)]
 async def _index_note(note_id: str, title: str, content: str,
                       tags: list[str], folder: str) -> None:
     if not content.strip():
+        logger.debug("Skipping index for note %s — empty content", note_id)
         return
+    logger.info("Indexing note %s (%d chars) folder=%s", note_id, len(content), folder)
     try:
         chunks = chunk_text(content)
         if not chunks:
+            logger.warning("No chunks produced for note %s — skipping", note_id)
             return
-        texts = [c["text"] for c in chunks]
-        embs = await embeddings.embed_texts(texts)
-        ids = [f"{note_id}_{c['chunk_index']}" for c in chunks]
-        metas = [
-            {
-                "note_id": note_id,
-                "chunk_index": c["chunk_index"],
-                "title": title,
-                "tags": json.dumps(tags),
-                "folder": folder,
-                "source_type": "note",
-                "source_label": title,
-            }
-            for c in chunks
-        ]
-        await vector_store.upsert(texts, embs, metas, ids)
+        n = len(chunks)
+        batch_size = settings.index_batch_size
+        logger.debug("Note %s: %d chunk(s), index_batch_size=%d", note_id, n, batch_size)
+        for i in range(0, n, batch_size):
+            batch = chunks[i : i + batch_size]
+            texts = [c["text"] for c in batch]
+            embs = await embeddings.embed_texts(texts)
+            ids = [f"{note_id}_{c['chunk_index']}" for c in batch]
+            metas = [
+                {
+                    "note_id": note_id,
+                    "chunk_index": c["chunk_index"],
+                    "title": title,
+                    "tags": json.dumps(tags),
+                    "folder": folder,
+                    "source_type": "note",
+                    "source_label": title,
+                }
+                for c in batch
+            ]
+            await vector_store.upsert(texts, embs, metas, ids)
+            logger.debug("Note %s: upserted chunks %d–%d / %d", note_id, i, i + len(batch), n)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
             await db.set_note_indexed(conn, note_id)
             summary = await _llm_summary(content)
             await db.set_note_summary(conn, note_id, summary)
-        logger.info("Indexed note %s: %d chunk(s)", note_id, len(chunks))
+        logger.info("Indexed note %s: %d chunk(s)", note_id, n)
     except Exception:
-        logger.error("Failed to index note", extra={"note_id": note_id}, exc_info=True)
+        logger.error("Failed to index note %s", note_id, exc_info=True)
 
 
 async def _index_attachment(att_id: str, note_id: str, text: str,
                              source_label: str, source_url: str | None = None) -> None:
+    logger.info("Indexing attachment %s for note %s (%d chars)", att_id, note_id, len(text))
     try:
         chunks = chunk_text(text)
         if not chunks:
+            logger.warning("No chunks produced for attachment %s — skipping", att_id)
             return
-        texts = [c["text"] for c in chunks]
-        embs = await embeddings.embed_texts(texts)
-        ids = [f"{att_id}_c{c['chunk_index']}" for c in chunks]
-        metas = [
-            {
-                "note_id": note_id,
-                "attachment_id": att_id,
-                "chunk_index": c["chunk_index"],
-                "source_type": "attachment",
-                "source_label": source_label,
-                "source_url": source_url or "",
-            }
-            for c in chunks
-        ]
-        await vector_store.upsert(texts, embs, metas, ids)
+        n = len(chunks)
+        batch_size = settings.index_batch_size
+        logger.info("Attachment %s: %d chunk(s), index_batch_size=%d", att_id, n, batch_size)
+        for i in range(0, n, batch_size):
+            batch = chunks[i : i + batch_size]
+            texts = [c["text"] for c in batch]
+            embs = await embeddings.embed_texts(texts)
+            ids = [f"{att_id}_c{c['chunk_index']}" for c in batch]
+            metas = [
+                {
+                    "note_id": note_id,
+                    "attachment_id": att_id,
+                    "chunk_index": c["chunk_index"],
+                    "source_type": "attachment",
+                    "source_label": source_label,
+                    "source_url": source_url or "",
+                }
+                for c in batch
+            ]
+            await vector_store.upsert(texts, embs, metas, ids)
+            logger.info("Attachment %s: upserted batch %d–%d / %d", att_id, i, i + len(batch), n)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
             await db.update_attachment(conn, att_id, indexed_at=_now())
-        logger.info("Indexed attachment %s for note %s: %d chunk(s)", att_id, note_id, len(chunks))
+        logger.info("Indexed attachment %s: %d chunk(s) total", att_id, n)
     except Exception:
-        logger.error("Failed to index attachment", extra={"note_id": note_id, "attachment_id": att_id}, exc_info=True)
+        logger.error("Failed to index attachment %s for note %s", att_id, note_id, exc_info=True)
 
 
 async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
@@ -249,6 +269,10 @@ async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
             )
             await db.set_note_type(conn, note_id, 'attachment')
         await _index_attachment(att_id, note_id, result.text, original_filename)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await db.set_note_indexed(conn, note_id)
     except PDFExtractionError as exc:
         logger.error("PDF extraction failed", extra={"attachment_id": att_id, "note_id": note_id}, exc_info=True)
         async with aiosqlite.connect(settings.database_url) as conn:
@@ -282,6 +306,10 @@ async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
             note_type = 'video' if get_youtube_video_id(url) else 'url'
             await db.set_note_type(conn, note_id, note_type)
         await _index_attachment(att_id, note_id, result.text, label, source_url=url)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await db.set_note_indexed(conn, note_id)
     except WebExtractionError as exc:
         logger.error("Web extraction failed", extra={"attachment_id": att_id, "note_id": note_id}, exc_info=True)
         async with aiosqlite.connect(settings.database_url) as conn:

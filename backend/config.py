@@ -9,8 +9,10 @@ class Settings(BaseSettings):
     embedding_base_url: str = "http://localhost:8080"
     embedding_model: str = "nomic-embed-text"
     embedding_batch_size: int = 32
-    chunk_size: int = 512
+    index_batch_size: int = 200  # chunks embedded+upserted per round-trip
+    chunk_size: int = 350
     chunk_overlap: int = 64
+    chunk_max_chars: int = 500   # tokenizer-agnostic character ceiling per chunk
     attachment_dir: str = "./attachments"
     app_base_url: str = "https://localhost:8443"
     summary_base_url: str | None = None
