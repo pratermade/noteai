@@ -37,6 +37,11 @@ from .telegram_config import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_DEFAULT_CHARACTER_PROMPT = (
+    "You are Alfred, a dry witty butler assistant. "
+    "You are helpful but value the user's time, so you keep banter quick and dry."
+)
+
 # Held at module level so the GC never collects it.
 _scheduler: AsyncIOScheduler | None = None
 
@@ -181,6 +186,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ---------------------------------------------------------------------------
 
 async def send_scheduled_reminder(bot) -> None:
+    char_prompt = await _get_character_prompt()
     today = date.today().isoformat()
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
@@ -208,9 +214,9 @@ async def send_scheduled_reminder(bot) -> None:
             {
                 "role": "system",
                 "content": (
-                    "You are Alfred, the user's dry, witty butler. "
+                    f"{char_prompt} "
                     "The user has no overdue or due tasks today — they are all caught up. "
-                    "Send a brief, genuine well-done (1-2 sentences) in Alfred's voice. "
+                    "Send a brief, genuine well-done (1-2 sentences). "
                     "Warm but understated. No bullet points, no markdown, no headers."
                 ),
             },
@@ -226,9 +232,9 @@ async def send_scheduled_reminder(bot) -> None:
             {
                 "role": "system",
                 "content": (
-                    "You are Alfred, the user's dry, witty butler. "
+                    f"{char_prompt} "
                     "You are sending a proactive scheduled reminder via Telegram. "
-                    "Summarize the provided due tasks in Alfred's voice — helpful, brief, and a touch wry. "
+                    "Summarize the provided due tasks — helpful, brief, and a touch wry. "
                     "Be a little opinionated about what they should tackle first. No bullet points."
                 ),
             },
@@ -324,8 +330,24 @@ async def _get_journal_reminder_times() -> list[tuple[int, int]]:
     return []
 
 
+async def _get_character_prompt() -> str:
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
+                "SELECT value FROM app_settings WHERE key = 'character_prompt'"
+            ) as cur:
+                row = await cur.fetchone()
+            if row and row[0].strip():
+                return row[0].strip()
+    except Exception:
+        pass
+    return _DEFAULT_CHARACTER_PROMPT
+
+
 async def _check_and_send_journal_reminder(bot) -> None:
     """Check if a journal entry exists for today; nudge the user if not."""
+    char_prompt = await _get_character_prompt()
     today = datetime.now().strftime("%Y-%m-%d")
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
@@ -352,9 +374,9 @@ async def _check_and_send_journal_reminder(bot) -> None:
             {
                 "role": "system",
                 "content": (
-                    "You are Alfred, the user's dry, witty butler. "
+                    f"{char_prompt} "
                     "The user has already written their journal entry today. "
-                    "Send a brief, genuine well-done (1-2 sentences) in Alfred's voice. "
+                    "Send a brief, genuine well-done (1-2 sentences). "
                     "Warm but understated. No bullet points, no markdown, no headers."
                 ),
             },
@@ -366,9 +388,9 @@ async def _check_and_send_journal_reminder(bot) -> None:
             {
                 "role": "system",
                 "content": (
-                    "You are Alfred, the user's dry, witty butler. "
+                    f"{char_prompt} "
                     "The user has not written a journal entry today. "
-                    "Write a short nudge (2-3 sentences, under 100 words) in Alfred's voice encouraging them to "
+                    "Write a short nudge (2-3 sentences, under 100 words) encouraging them to "
                     "take a few minutes and reflect on their day. "
                     "Helpful, brief, and a touch wry. No bullet points, no markdown, no headers."
                 ),

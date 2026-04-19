@@ -20,6 +20,11 @@ from .models import FOLDERS
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_CHARACTER_PROMPT = (
+    "You are Alfred, a dry witty butler assistant. "
+    "You are helpful but value the user's time, so you keep banter quick and dry."
+)
+
 # ---------------------------------------------------------------------------
 # Persistent LLM HTTP client (reuses TCP connections across requests)
 # ---------------------------------------------------------------------------
@@ -100,6 +105,20 @@ async def _get_due_reminders() -> tuple[str, list[dict]]:
     except Exception:
         logger.warning("Failed to fetch due reminders", exc_info=True)
         return "", []
+
+
+async def _get_character_prompt() -> str:
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            async with conn.execute(
+                "SELECT value FROM app_settings WHERE key = 'character_prompt'"
+            ) as cur:
+                row = await cur.fetchone()
+            if row and row[0].strip():
+                return row[0].strip()
+    except Exception:
+        pass
+    return _DEFAULT_CHARACTER_PROMPT
 
 
 def _format_reminders_md(reminders: list[dict]) -> str:
@@ -217,15 +236,15 @@ def _format_sources_md(sources: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_messages(original: list[dict], context: str, reminders: str = "") -> list[dict]:
+def _build_messages(original: list[dict], context: str, reminders: str = "", character_prompt: str = "") -> list[dict]:
     now = datetime.now(timezone.utc).strftime("%A, %B %-d %Y, %H:%M UTC")
+    char = character_prompt or _DEFAULT_CHARACTER_PROMPT
     system = (
         f"Current date and time: {now}\n\n"
-        "You are a helpful butler/assistant with access to the user's personal notes. "
-        "You are like Alfred from batman, very helpful but also you appreciate that my time is important so banter is kept quick and dry"
-        "I only want to discuss my notes if I ask about them"
+        f"{char}\n"
+        "I only want to discuss my notes if I ask about them. "
         "Use the context below — excerpts from their notes — to answer accurately. "
-        "If the notes don't contain relevant information, say so and answer from general knowledge."
+        "If the notes don't contain relevant information, say so and answer from general knowledge. "
         "If the answer from the notes is incomplete, say so and expand the thoughts from general knowledge."
     )
     if reminders:
@@ -296,12 +315,13 @@ async def chat_completions(body: ChatRequest):
     async def _no_reminders():
         return "", []
 
-    (context, sources), (reminders_text, reminders_list) = await asyncio.gather(
+    (context, sources), (reminders_text, reminders_list), character_prompt = await asyncio.gather(
         _retrieve_context(query) if query else _no_context(),
         _no_reminders() if body.skip_reminders else _get_due_reminders(),
+        _get_character_prompt(),
     )
     reminders_md = _format_reminders_md(reminders_list)
-    messages = _build_messages([m.model_dump() for m in body.messages], context, reminders_text)
+    messages = _build_messages([m.model_dump() for m in body.messages], context, reminders_text, character_prompt)
 
     payload: dict = {"model": _llm_model(), "messages": messages}
     if body.max_tokens is not None:

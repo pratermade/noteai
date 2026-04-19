@@ -118,6 +118,7 @@ class SettingsPatch(BaseModel):
     telegram_rag_url: str | None = None
     telegram_rag_model: str | None = None
     telegram_max_history: int | None = None
+    character_prompt: str | None = None
 
 
 class SettingsResponse(BaseModel):
@@ -130,6 +131,7 @@ class SettingsResponse(BaseModel):
     telegram_rag_url: str
     telegram_rag_model: str
     telegram_max_history: int
+    character_prompt: str
 
 
 class ReindexJob(BaseModel):
