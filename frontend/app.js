@@ -1168,6 +1168,36 @@ $('btn-test-telegram').addEventListener('click', async () => {
   }
 });
 
+$('btn-test-task-reminder').addEventListener('click', async () => {
+  const btn = $('btn-test-task-reminder');
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try {
+    await apiFetch('/api/settings/test-task-reminder', { method: 'POST' });
+    toast('Task reminder sent! Check your Telegram.', 'success');
+  } catch (e) {
+    toast('Test failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Send Test Reminder';
+  }
+});
+
+$('btn-test-journal-reminder').addEventListener('click', async () => {
+  const btn = $('btn-test-journal-reminder');
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try {
+    await apiFetch('/api/settings/test-journal-reminder', { method: 'POST' });
+    toast('Journal reminder sent! Check your Telegram.', 'success');
+  } catch (e) {
+    toast('Test failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Send Test Reminder';
+  }
+});
+
 $('btn-settings').addEventListener('click', () => {
   showSettingsView();
 });

@@ -1054,6 +1054,103 @@ async def test_telegram(conn: DB):
     return {"ok": True}
 
 
+@app.post("/api/settings/test-task-reminder")
+async def test_task_reminder(conn: DB):
+    token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
+    chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
+    rag_url = await db.get_setting(conn, "telegram_rag_url") or os.environ.get("TELEGRAM_RAG_URL", "http://localhost:8084")
+    rag_model = await db.get_setting(conn, "telegram_rag_model") or os.environ.get("TELEGRAM_RAG_MODEL", "noterai-rag")
+
+    if not token:
+        raise HTTPException(status_code=400, detail="Bot token is not configured")
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="Reminder chat ID is not configured")
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are sending a proactive scheduled reminder to the user via Telegram. "
+                "Summarize what tasks are due or overdue. Be concise, conversational, "
+                "and a little opinionated about what they should tackle first. "
+                "If nothing is due, say so briefly and wish them well."
+            ),
+        },
+        {"role": "user", "content": "What tasks are due today or overdue?"},
+    ]
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        rag_resp = await client.post(
+            f"{rag_url}/v1/chat/completions",
+            json={"model": rag_model, "messages": messages, "stream": False},
+        )
+        if rag_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"RAG API error: {rag_resp.text}")
+        text = rag_resp.json()["choices"][0]["message"]["content"]
+
+    text = re.sub(r'\n---\n\*\*Sources\*\*.*?(?=\n---\n|$)', '', text, flags=re.DOTALL).strip()
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        tg_resp = await client.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+        )
+    if tg_resp.status_code != 200:
+        detail = tg_resp.json().get("description", "unknown error")
+        raise HTTPException(status_code=502, detail=f"Telegram API error: {detail}")
+
+    return {"ok": True}
+
+
+@app.post("/api/settings/test-journal-reminder")
+async def test_journal_reminder(conn: DB):
+    token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
+    chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
+    rag_url = await db.get_setting(conn, "telegram_rag_url") or os.environ.get("TELEGRAM_RAG_URL", "http://localhost:8084")
+    rag_model = await db.get_setting(conn, "telegram_rag_model") or os.environ.get("TELEGRAM_RAG_MODEL", "noterai-rag")
+
+    if not token:
+        raise HTTPException(status_code=400, detail="Bot token is not configured")
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="Reminder chat ID is not configured")
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are the user's personal AI assistant — warm, witty, and just a little persistent. "
+                "The user has not written a journal entry today. "
+                "Write a short, genuine nudge (2-3 sentences, under 100 words) encouraging them to "
+                "take a few minutes and reflect on their day. "
+                "Be conversational and a touch playful. No bullet points, no markdown, no headers."
+            ),
+        },
+        {"role": "user", "content": "Remind me to write my journal entry for today."},
+    ]
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        rag_resp = await client.post(
+            f"{rag_url}/v1/chat/completions",
+            json={"model": rag_model, "messages": messages, "stream": False},
+        )
+        if rag_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"RAG API error: {rag_resp.text}")
+        text = rag_resp.json()["choices"][0]["message"]["content"]
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        tg_resp = await client.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+        )
+    if tg_resp.status_code != 200:
+        detail = tg_resp.json().get("description", "unknown error")
+        raise HTTPException(status_code=502, detail=f"Telegram API error: {detail}")
+
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Share target
 # ---------------------------------------------------------------------------
