@@ -10,7 +10,7 @@ import uuid
 
 from pythonjsonlogger import jsonlogger
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -1059,38 +1059,51 @@ async def test_task_reminder(conn: DB):
     token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
     chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
-    rag_url = await db.get_setting(conn, "telegram_rag_url") or os.environ.get("TELEGRAM_RAG_URL", "http://localhost:8084")
-    rag_model = await db.get_setting(conn, "telegram_rag_model") or os.environ.get("TELEGRAM_RAG_MODEL", "noterai-rag")
 
     if not token:
         raise HTTPException(status_code=400, detail="Bot token is not configured")
     if not chat_id:
         raise HTTPException(status_code=400, detail="Reminder chat ID is not configured")
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are sending a proactive scheduled reminder to the user via Telegram. "
-                "Summarize what tasks are due or overdue. Be concise, conversational, "
-                "and a little opinionated about what they should tackle first. "
-                "If nothing is due, say so briefly and wish them well."
-            ),
-        },
-        {"role": "user", "content": "What tasks are due today or overdue?"},
-    ]
+    today = date.today().isoformat()
+    async with conn.execute(
+        "SELECT title, reminder_at FROM notes "
+        "WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+        (today,),
+    ) as cur:
+        rows = await cur.fetchall()
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        rag_resp = await client.post(
-            f"{rag_url}/v1/chat/completions",
-            json={"model": rag_model, "messages": messages, "stream": False, "skip_reminders": True},
-        )
-        if rag_resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"RAG API error: {rag_resp.text}")
-        text = rag_resp.json()["choices"][0]["message"]["content"]
+    if not rows:
+        text = "Nothing due today. Have a great day."
+    else:
+        task_lines = []
+        for r in rows:
+            label = "Overdue" if r["reminder_at"] < today else "Due today"
+            task_lines.append(f"- {label} ({r['reminder_at']}): {r['title']}")
+        task_list = "Here are my due and overdue tasks:\n" + "\n".join(task_lines)
 
-    text = re.sub(r'\n---\n\*\*Sources\*\*.*?(?=\n---\n|$)', '', text, flags=re.DOTALL).strip()
-    text = re.sub(r'\s*\[\d+\]', '', text).strip()
+        if not settings.summary_base_url:
+            text = task_list
+        else:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are sending a proactive scheduled reminder to the user via Telegram. "
+                        "Summarize the provided tasks. Be concise, conversational, "
+                        "and a little opinionated about what they should tackle first."
+                    ),
+                },
+                {"role": "user", "content": task_list},
+            ]
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                llm_resp = await client.post(
+                    f"{settings.summary_base_url}/v1/chat/completions",
+                    json={"model": settings.summary_model, "messages": messages, "stream": False},
+                )
+                if llm_resp.status_code != 200:
+                    raise HTTPException(status_code=502, detail=f"LLM API error: {llm_resp.text}")
+                text = llm_resp.json()["choices"][0]["message"]["content"]
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         tg_resp = await client.post(
