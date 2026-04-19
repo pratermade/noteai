@@ -1108,13 +1108,13 @@ async def test_journal_reminder(conn: DB):
     token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
     chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
-    rag_url = await db.get_setting(conn, "telegram_rag_url") or os.environ.get("TELEGRAM_RAG_URL", "http://localhost:8084")
-    rag_model = await db.get_setting(conn, "telegram_rag_model") or os.environ.get("TELEGRAM_RAG_MODEL", "noterai-rag")
 
     if not token:
         raise HTTPException(status_code=400, detail="Bot token is not configured")
     if not chat_id:
         raise HTTPException(status_code=400, detail="Reminder chat ID is not configured")
+    if not settings.summary_base_url:
+        raise HTTPException(status_code=400, detail="SUMMARY_BASE_URL is not configured")
 
     messages = [
         {
@@ -1130,14 +1130,14 @@ async def test_journal_reminder(conn: DB):
         {"role": "user", "content": "Remind me to write my journal entry for today."},
     ]
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        rag_resp = await client.post(
-            f"{rag_url}/v1/chat/completions",
-            json={"model": rag_model, "messages": messages, "stream": False},
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        llm_resp = await client.post(
+            f"{settings.summary_base_url}/v1/chat/completions",
+            json={"model": settings.summary_model, "messages": messages, "stream": False},
         )
-        if rag_resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"RAG API error: {rag_resp.text}")
-        text = rag_resp.json()["choices"][0]["message"]["content"]
+        if llm_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"LLM API error: {llm_resp.text}")
+        text = llm_resp.json()["choices"][0]["message"]["content"]
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         tg_resp = await client.post(

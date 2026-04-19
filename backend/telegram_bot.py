@@ -299,6 +299,9 @@ async def _check_and_send_journal_reminder(bot) -> None:
         return
 
     logger.info("No journal entry for %s — sending reminder", today)
+    if not settings.summary_base_url:
+        logger.warning("SUMMARY_BASE_URL not configured — cannot send journal reminder")
+        return
     messages = [
         {
             "role": "system",
@@ -313,7 +316,13 @@ async def _check_and_send_journal_reminder(bot) -> None:
         {"role": "user", "content": "Remind me to write my journal entry for today."},
     ]
     try:
-        response = await query_rag(messages)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{settings.summary_base_url}/v1/chat/completions",
+                json={"model": settings.summary_model, "messages": messages, "stream": False},
+            )
+            resp.raise_for_status()
+            response = resp.json()["choices"][0]["message"]["content"]
         await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text=response)
     except Exception as exc:
         logger.error("Journal reminder send failed: %s", exc)
