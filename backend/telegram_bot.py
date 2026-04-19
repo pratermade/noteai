@@ -196,6 +196,7 @@ async def send_scheduled_reminder(bot) -> None:
     try:
         response = await query_rag(messages)
         response = re.sub(r'\n---\n\*\*Sources\*\*.*?(?=\n---\n|$)', '', response, flags=re.DOTALL).strip()
+        response = re.sub(r'\s*\[\d+\]', '', response).strip()
         # Split if over limit
         while len(response) > _TELEGRAM_LIMIT:
             cut = response.rfind("\n", 0, _TELEGRAM_LIMIT)
@@ -299,30 +300,22 @@ async def _check_and_send_journal_reminder(bot) -> None:
         return
 
     logger.info("No journal entry for %s — sending reminder", today)
-    if not settings.summary_base_url:
-        logger.warning("SUMMARY_BASE_URL not configured — cannot send journal reminder")
-        return
     messages = [
         {
             "role": "system",
             "content": (
-                "You are the user's personal AI assistant — warm, witty, and just a little persistent. "
                 "The user has not written a journal entry today. "
                 "Write a short, genuine nudge (2-3 sentences, under 100 words) encouraging them to "
                 "take a few minutes and reflect on their day. "
-                "Be conversational and a touch playful. No bullet points, no markdown, no headers."
+                "Be conversational and a touch playful. No bullet points, no markdown, no headers. "
+                "Do not cite any sources or include reference numbers."
             ),
         },
         {"role": "user", "content": "Remind me to write my journal entry for today."},
     ]
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{settings.summary_base_url}/v1/chat/completions",
-                json={"model": settings.summary_model, "messages": messages, "stream": False},
-            )
-            resp.raise_for_status()
-            response = resp.json()["choices"][0]["message"]["content"]
+        response = await query_rag(messages)
+        response = re.sub(r'\n---\n\*\*Sources\*\*.*?(?=\n---\n|$)', '', response, flags=re.DOTALL).strip()
         await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text=response)
     except Exception as exc:
         logger.error("Journal reminder send failed: %s", exc)
