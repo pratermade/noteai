@@ -236,6 +236,10 @@ def _build_messages(original: list[dict], context: str, reminders: str = "") -> 
             "Only cite a source if you actually used it in your answer.\n\n"
             f"## Relevant notes\n\n{context}"
         )
+    # If the caller included a system message, append it as additional instructions.
+    caller_system = next((m["content"] for m in original if m["role"] == "system"), None)
+    if caller_system:
+        system += f"\n\n{caller_system}"
     msgs = [{"role": "system", "content": system}]
     for m in original:
         if m["role"] != "system":
