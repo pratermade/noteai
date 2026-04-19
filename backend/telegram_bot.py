@@ -64,11 +64,11 @@ def restricted(func):
 # RAG API
 # ---------------------------------------------------------------------------
 
-async def query_rag(messages: list[dict]) -> str:
+async def query_rag(messages: list[dict], skip_reminders: bool = False) -> str:
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
             f"{TELEGRAM_RAG_URL}/v1/chat/completions",
-            json={"model": TELEGRAM_RAG_MODEL, "messages": messages, "stream": False},
+            json={"model": TELEGRAM_RAG_MODEL, "messages": messages, "stream": False, "skip_reminders": skip_reminders},
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
@@ -194,7 +194,7 @@ async def send_scheduled_reminder(bot) -> None:
         {"role": "user", "content": "What tasks are due today or overdue?"},
     ]
     try:
-        response = await query_rag(messages)
+        response = await query_rag(messages, skip_reminders=True)
         response = re.sub(r'\n---\n\*\*Sources\*\*.*?(?=\n---\n|$)', '', response, flags=re.DOTALL).strip()
         response = re.sub(r'\s*\[\d+\]', '', response).strip()
         # Split if over limit
@@ -314,7 +314,7 @@ async def _check_and_send_journal_reminder(bot) -> None:
         {"role": "user", "content": "Remind me to write my journal entry for today."},
     ]
     try:
-        response = await query_rag(messages)
+        response = await query_rag(messages, skip_reminders=True)
         response = re.sub(r'\n---\n\*\*Sources\*\*.*?(?=\n---\n|$)', '', response, flags=re.DOTALL).strip()
         await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text=response)
     except Exception as exc:

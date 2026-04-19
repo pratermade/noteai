@@ -281,6 +281,7 @@ class ChatRequest(BaseModel):
     stream: bool = False
     max_tokens: int | None = None
     temperature: float | None = None
+    skip_reminders: bool = False
 
 
 @app.post("/v1/chat/completions")
@@ -292,9 +293,12 @@ async def chat_completions(body: ChatRequest):
     async def _no_context():
         return "", []
 
+    async def _no_reminders():
+        return "", []
+
     (context, sources), (reminders_text, reminders_list) = await asyncio.gather(
         _retrieve_context(query) if query else _no_context(),
-        _get_due_reminders(),
+        _no_reminders() if body.skip_reminders else _get_due_reminders(),
     )
     reminders_md = _format_reminders_md(reminders_list)
     messages = _build_messages([m.model_dump() for m in body.messages], context, reminders_text)

@@ -1083,7 +1083,7 @@ async def test_task_reminder(conn: DB):
     async with httpx.AsyncClient(timeout=120.0) as client:
         rag_resp = await client.post(
             f"{rag_url}/v1/chat/completions",
-            json={"model": rag_model, "messages": messages, "stream": False},
+            json={"model": rag_model, "messages": messages, "stream": False, "skip_reminders": True},
         )
         if rag_resp.status_code != 200:
             raise HTTPException(status_code=502, detail=f"RAG API error: {rag_resp.text}")
@@ -1134,7 +1134,7 @@ async def test_journal_reminder(conn: DB):
     async with httpx.AsyncClient(timeout=120.0) as client:
         rag_resp = await client.post(
             f"{rag_url}/v1/chat/completions",
-            json={"model": rag_model, "messages": messages, "stream": False},
+            json={"model": rag_model, "messages": messages, "stream": False, "skip_reminders": True},
         )
         if rag_resp.status_code != 200:
             raise HTTPException(status_code=502, detail=f"RAG API error: {rag_resp.text}")
