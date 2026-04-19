@@ -331,22 +331,30 @@ async def _check_and_send_journal_reminder(bot) -> None:
         return
 
     logger.info("No journal entry for %s — sending reminder", today)
+    if not settings.summary_base_url:
+        await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text="Don't forget to write your journal entry today.")
+        return
     messages = [
         {
             "role": "system",
             "content": (
+                "You are Alfred, the user's dry, witty butler. "
                 "The user has not written a journal entry today. "
-                "Write a short, genuine nudge (2-3 sentences, under 100 words) encouraging them to "
+                "Write a short nudge (2-3 sentences, under 100 words) in Alfred's voice encouraging them to "
                 "take a few minutes and reflect on their day. "
-                "Be conversational and a touch playful. No bullet points, no markdown, no headers. "
-                "Do not cite any sources or include reference numbers."
+                "Helpful, brief, and a touch wry. No bullet points, no markdown, no headers."
             ),
         },
         {"role": "user", "content": "Remind me to write my journal entry for today."},
     ]
     try:
-        response = await query_rag(messages, skip_reminders=True)
-        response = re.sub(r'\n---\n\*\*Sources\*\*.*?(?=\n---\n|$)', '', response, flags=re.DOTALL).strip()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{settings.summary_base_url}/v1/chat/completions",
+                json={"model": settings.summary_model, "messages": messages, "stream": False},
+            )
+            resp.raise_for_status()
+            response = resp.json()["choices"][0]["message"]["content"]
         await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text=response)
     except Exception as exc:
         logger.error("Journal reminder send failed: %s", exc)
