@@ -326,27 +326,42 @@ async def _check_and_send_journal_reminder(bot) -> None:
         logger.error("Journal check failed: %s", exc)
         return
 
-    if count > 0:
-        logger.info("Journal entry exists for %s — skipping reminder", today)
+    if not settings.summary_base_url:
+        if count > 0:
+            await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text="Journal entry written. Well done.")
+        else:
+            await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text="Don't forget to write your journal entry today.")
         return
 
-    logger.info("No journal entry for %s — sending reminder", today)
-    if not settings.summary_base_url:
-        await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text="Don't forget to write your journal entry today.")
-        return
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Alfred, the user's dry, witty butler. "
-                "The user has not written a journal entry today. "
-                "Write a short nudge (2-3 sentences, under 100 words) in Alfred's voice encouraging them to "
-                "take a few minutes and reflect on their day. "
-                "Helpful, brief, and a touch wry. No bullet points, no markdown, no headers."
-            ),
-        },
-        {"role": "user", "content": "Remind me to write my journal entry for today."},
-    ]
+    if count > 0:
+        logger.info("Journal entry exists for %s — sending kudos", today)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Alfred, the user's dry, witty butler. "
+                    "The user has already written their journal entry today. "
+                    "Send a brief, genuine well-done (1-2 sentences) in Alfred's voice. "
+                    "Warm but understated. No bullet points, no markdown, no headers."
+                ),
+            },
+            {"role": "user", "content": "I've written my journal entry for today."},
+        ]
+    else:
+        logger.info("No journal entry for %s — sending reminder", today)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Alfred, the user's dry, witty butler. "
+                    "The user has not written a journal entry today. "
+                    "Write a short nudge (2-3 sentences, under 100 words) in Alfred's voice encouraging them to "
+                    "take a few minutes and reflect on their day. "
+                    "Helpful, brief, and a touch wry. No bullet points, no markdown, no headers."
+                ),
+            },
+            {"role": "user", "content": "Remind me to write my journal entry for today."},
+        ]
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(

@@ -1131,19 +1131,41 @@ async def test_journal_reminder(conn: DB):
     if not settings.summary_base_url:
         raise HTTPException(status_code=400, detail="SUMMARY_BASE_URL is not configured")
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Alfred, the user's dry, witty butler. "
-                "The user has not written a journal entry today. "
-                "Write a short nudge (2-3 sentences, under 100 words) in Alfred's voice encouraging them to "
-                "take a few minutes and reflect on their day. "
-                "Helpful, brief, and a touch wry. No bullet points, no markdown, no headers."
-            ),
-        },
-        {"role": "user", "content": "Remind me to write my journal entry for today."},
-    ]
+    today = date.today().isoformat()
+    async with conn.execute(
+        "SELECT COUNT(*) FROM notes WHERE folder = 'Journal' AND substr(created_at, 1, 10) = ?",
+        (today,),
+    ) as cur:
+        row = await cur.fetchone()
+    has_entry = (row[0] if row else 0) > 0
+
+    if has_entry:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Alfred, the user's dry, witty butler. "
+                    "The user has already written their journal entry today. "
+                    "Send a brief, genuine well-done (1-2 sentences) in Alfred's voice. "
+                    "Warm but understated. No bullet points, no markdown, no headers."
+                ),
+            },
+            {"role": "user", "content": "I've written my journal entry for today."},
+        ]
+    else:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Alfred, the user's dry, witty butler. "
+                    "The user has not written a journal entry today. "
+                    "Write a short nudge (2-3 sentences, under 100 words) in Alfred's voice encouraging them to "
+                    "take a few minutes and reflect on their day. "
+                    "Helpful, brief, and a touch wry. No bullet points, no markdown, no headers."
+                ),
+            },
+            {"role": "user", "content": "Remind me to write my journal entry for today."},
+        ]
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         llm_resp = await client.post(
