@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import date, datetime
 from functools import wraps
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -181,23 +181,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ---------------------------------------------------------------------------
 
 async def send_scheduled_reminder(bot) -> None:
+    today = date.today().isoformat()
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute(
+                "SELECT title, reminder_at FROM notes "
+                "WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+                (today,),
+            ) as cur:
+                rows = await cur.fetchall()
+    except Exception as exc:
+        logger.error("Failed to fetch due tasks: %s", exc)
+        return
+
+    if not rows:
+        await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text="Nothing due today. Have a great day.")
+        return
+
+    task_lines = []
+    for r in rows:
+        label = "Overdue" if r["reminder_at"] < today else "Due today"
+        task_lines.append(f"- {label} ({r['reminder_at']}): {r['title']}")
+    task_list = "Here are my due and overdue tasks:\n" + "\n".join(task_lines)
+
+    if not settings.summary_base_url:
+        await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text=task_list)
+        return
+
     messages = [
         {
             "role": "system",
             "content": (
                 "You are sending a proactive scheduled reminder to the user via Telegram. "
-                "Summarize what tasks are due or overdue. Be concise, conversational, "
-                "and a little opinionated about what they should tackle first. "
-                "If nothing is due, say so briefly and wish them well."
+                "Summarize the provided tasks. Be concise, conversational, "
+                "and a little opinionated about what they should tackle first."
             ),
         },
-        {"role": "user", "content": "What tasks are due today or overdue?"},
+        {"role": "user", "content": task_list},
     ]
     try:
-        response = await query_rag(messages, skip_reminders=True)
-        response = re.sub(r'\n---\n\*\*Sources\*\*.*?(?=\n---\n|$)', '', response, flags=re.DOTALL).strip()
-        response = re.sub(r'\s*\[\d+\]', '', response).strip()
-        # Split if over limit
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{settings.summary_base_url}/v1/chat/completions",
+                json={"model": settings.summary_model, "messages": messages, "stream": False},
+            )
+            resp.raise_for_status()
+            response = resp.json()["choices"][0]["message"]["content"]
         while len(response) > _TELEGRAM_LIMIT:
             cut = response.rfind("\n", 0, _TELEGRAM_LIMIT)
             if cut <= 0:
