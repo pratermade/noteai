@@ -195,32 +195,45 @@ async def send_scheduled_reminder(bot) -> None:
         logger.error("Failed to fetch due tasks: %s", exc)
         return
 
-    if not rows:
-        await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text="Nothing due today. Have a great day.")
-        return
-
-    task_lines = []
-    for r in rows:
-        label = "Overdue" if r["reminder_at"] < today else "Due today"
-        task_lines.append(f"- {label} ({r['reminder_at']}): {r['title']}")
-    task_list = "Here are my due and overdue tasks:\n" + "\n".join(task_lines)
-
     if not settings.summary_base_url:
-        await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text=task_list)
+        if not rows:
+            await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text="Nothing due today. Well done.")
+        else:
+            task_lines = [f"- {'Overdue' if r['reminder_at'] < today else 'Due today'} ({r['reminder_at']}): {r['title']}" for r in rows]
+            await bot.send_message(chat_id=TELEGRAM_REMINDER_CHAT_ID, text="Due tasks:\n" + "\n".join(task_lines))
         return
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Alfred, the user's dry, witty butler. "
-                "You are sending a proactive scheduled reminder via Telegram. "
-                "Summarize the provided due tasks in Alfred's voice — helpful, brief, and a touch wry. "
-                "Be a little opinionated about what they should tackle first. No bullet points."
-            ),
-        },
-        {"role": "user", "content": task_list},
-    ]
+    if not rows:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Alfred, the user's dry, witty butler. "
+                    "The user has no overdue or due tasks today — they are all caught up. "
+                    "Send a brief, genuine well-done (1-2 sentences) in Alfred's voice. "
+                    "Warm but understated. No bullet points, no markdown, no headers."
+                ),
+            },
+            {"role": "user", "content": "I have no tasks due today."},
+        ]
+    else:
+        task_lines = []
+        for r in rows:
+            label = "Overdue" if r["reminder_at"] < today else "Due today"
+            task_lines.append(f"- {label} ({r['reminder_at']}): {r['title']}")
+        task_list = "Here are my due and overdue tasks:\n" + "\n".join(task_lines)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Alfred, the user's dry, witty butler. "
+                    "You are sending a proactive scheduled reminder via Telegram. "
+                    "Summarize the provided due tasks in Alfred's voice — helpful, brief, and a touch wry. "
+                    "Be a little opinionated about what they should tackle first. No bullet points."
+                ),
+            },
+            {"role": "user", "content": task_list},
+        ]
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
