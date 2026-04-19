@@ -930,6 +930,10 @@ async def reindex_status(job_id: str | None = Query(default=None)):
 
 _DEFAULT_REMINDER_TIMES = "08:00,14:00"
 _TIME_RE = re.compile(r"^(\d{2}):(\d{2})$")
+_DEFAULT_CHARACTER_PROMPT = (
+    "You are Alfred, a dry witty butler assistant. "
+    "You are helpful but value the user's time, so you keep banter quick and dry."
+)
 
 
 def _parse_times(s: str) -> list[str]:
@@ -987,6 +991,7 @@ async def _build_settings_response(conn) -> SettingsResponse:
         telegram_rag_url=await _get("telegram_rag_url", "TELEGRAM_RAG_URL", "http://localhost:8084"),
         telegram_rag_model=await _get("telegram_rag_model", "TELEGRAM_RAG_MODEL", "noterai-rag"),
         telegram_max_history=max_hist,
+        character_prompt=await _get("character_prompt", default=""),
     )
 
 
@@ -1027,6 +1032,8 @@ async def update_settings(body: SettingsPatch, conn: DB):
         await db.set_setting(conn, "telegram_rag_model", body.telegram_rag_model)
     if body.telegram_max_history is not None:
         await db.set_setting(conn, "telegram_max_history", str(body.telegram_max_history))
+    if body.character_prompt is not None:
+        await db.set_setting(conn, "character_prompt", body.character_prompt)
     return await _build_settings_response(conn)
 
 
@@ -1065,6 +1072,7 @@ async def test_task_reminder(conn: DB):
     if not chat_id:
         raise HTTPException(status_code=400, detail="Reminder chat ID is not configured")
 
+    char_prompt = await db.get_setting(conn, "character_prompt") or _DEFAULT_CHARACTER_PROMPT
     today = date.today().isoformat()
     async with conn.execute(
         "SELECT title, reminder_at FROM notes "
@@ -1084,9 +1092,9 @@ async def test_task_reminder(conn: DB):
             {
                 "role": "system",
                 "content": (
-                    "You are Alfred, the user's dry, witty butler. "
+                    f"{char_prompt} "
                     "The user has no overdue or due tasks today — they are all caught up. "
-                    "Send a brief, genuine well-done (1-2 sentences) in Alfred's voice. "
+                    "Send a brief, genuine well-done (1-2 sentences). "
                     "Warm but understated. No bullet points, no markdown, no headers."
                 ),
             },
@@ -1110,9 +1118,9 @@ async def test_task_reminder(conn: DB):
             {
                 "role": "system",
                 "content": (
-                    "You are Alfred, the user's dry, witty butler. "
+                    f"{char_prompt} "
                     "You are sending a proactive scheduled reminder via Telegram. "
-                    "Summarize the provided due tasks in Alfred's voice — helpful, brief, and a touch wry. "
+                    "Summarize the provided due tasks — helpful, brief, and a touch wry. "
                     "Be a little opinionated about what they should tackle first. No bullet points."
                 ),
             },
@@ -1152,6 +1160,7 @@ async def test_journal_reminder(conn: DB):
     if not settings.summary_base_url:
         raise HTTPException(status_code=400, detail="SUMMARY_BASE_URL is not configured")
 
+    char_prompt = await db.get_setting(conn, "character_prompt") or _DEFAULT_CHARACTER_PROMPT
     today = date.today().isoformat()
     async with conn.execute(
         "SELECT COUNT(*) FROM notes WHERE folder = 'Journal' AND substr(created_at, 1, 10) = ?",
@@ -1165,9 +1174,9 @@ async def test_journal_reminder(conn: DB):
             {
                 "role": "system",
                 "content": (
-                    "You are Alfred, the user's dry, witty butler. "
+                    f"{char_prompt} "
                     "The user has already written their journal entry today. "
-                    "Send a brief, genuine well-done (1-2 sentences) in Alfred's voice. "
+                    "Send a brief, genuine well-done (1-2 sentences). "
                     "Warm but understated. No bullet points, no markdown, no headers."
                 ),
             },
@@ -1178,9 +1187,9 @@ async def test_journal_reminder(conn: DB):
             {
                 "role": "system",
                 "content": (
-                    "You are Alfred, the user's dry, witty butler. "
+                    f"{char_prompt} "
                     "The user has not written a journal entry today. "
-                    "Write a short nudge (2-3 sentences, under 100 words) in Alfred's voice encouraging them to "
+                    "Write a short nudge (2-3 sentences, under 100 words) encouraging them to "
                     "take a few minutes and reflect on their day. "
                     "Helpful, brief, and a touch wry. No bullet points, no markdown, no headers."
                 ),

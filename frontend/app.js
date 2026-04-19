@@ -1066,6 +1066,7 @@ async function loadSettings() {
     $('tg-rag-url').value           = data.telegram_rag_url || '';
     $('tg-rag-model').value         = data.telegram_rag_model || '';
     $('tg-max-history').value       = data.telegram_max_history || '';
+    $('character-prompt').value     = data.character_prompt || '';
     $('server-timezone').value = data.server_timezone || '';
     _loadedTgCredentials = {
       tz:      data.server_timezone || '',
@@ -1114,6 +1115,7 @@ $('btn-settings-save').addEventListener('click', async () => {
     telegram_rag_url: $('tg-rag-url').value.trim() || undefined,
     telegram_rag_model: $('tg-rag-model').value.trim() || undefined,
     telegram_max_history: maxHist || undefined,
+    character_prompt: $('character-prompt').value.trim() || undefined,
   };
   // Drop undefined keys so PATCH treats them as "don't change"
   Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
