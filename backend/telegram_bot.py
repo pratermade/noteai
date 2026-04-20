@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import re
-from datetime import date, datetime
+from datetime import datetime
 from functools import wraps
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -187,7 +187,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def send_scheduled_reminder(bot) -> None:
     char_prompt = await _get_character_prompt()
-    today = date.today().isoformat()
+    tz = await _get_timezone()
+    now_str = (datetime.now(tz) if tz else datetime.now()).strftime("%A, %B %-d %Y, %H:%M")
+    today = (datetime.now(tz) if tz else datetime.now()).strftime("%Y-%m-%d")
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
@@ -214,6 +216,7 @@ async def send_scheduled_reminder(bot) -> None:
             {
                 "role": "system",
                 "content": (
+                    f"Current date and time: {now_str}\n\n"
                     f"{char_prompt} "
                     "The user has no overdue or due tasks today — they are all caught up. "
                     "Send a brief, genuine well-done (1-2 sentences). "
@@ -232,6 +235,7 @@ async def send_scheduled_reminder(bot) -> None:
             {
                 "role": "system",
                 "content": (
+                    f"Current date and time: {now_str}\n\n"
                     f"{char_prompt} "
                     "You are sending a proactive scheduled reminder via Telegram. "
                     "Summarize the provided due tasks — helpful, brief, and a touch wry. "
@@ -348,7 +352,9 @@ async def _get_character_prompt() -> str:
 async def _check_and_send_journal_reminder(bot) -> None:
     """Check if a journal entry exists for today; nudge the user if not."""
     char_prompt = await _get_character_prompt()
-    today = datetime.now().strftime("%Y-%m-%d")
+    tz = await _get_timezone()
+    now_str = (datetime.now(tz) if tz else datetime.now()).strftime("%A, %B %-d %Y, %H:%M")
+    today = (datetime.now(tz) if tz else datetime.now()).strftime("%Y-%m-%d")
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             async with conn.execute(
@@ -374,6 +380,7 @@ async def _check_and_send_journal_reminder(bot) -> None:
             {
                 "role": "system",
                 "content": (
+                    f"Current date and time: {now_str}\n\n"
                     f"{char_prompt} "
                     "The user has already written their journal entry today. "
                     "Send a brief, genuine well-done (1-2 sentences). "
@@ -388,6 +395,7 @@ async def _check_and_send_journal_reminder(bot) -> None:
             {
                 "role": "system",
                 "content": (
+                    f"Current date and time: {now_str}\n\n"
                     f"{char_prompt} "
                     "The user has not written a journal entry today. "
                     "Write a short nudge (2-3 sentences, under 100 words) encouraging them to "
