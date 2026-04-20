@@ -134,6 +134,22 @@ class SettingsResponse(BaseModel):
     character_prompt: str
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    token: str
+    username: str
+
+
+class UserResponse(BaseModel):
+    id: str
+    username: str
+    created_at: str
+
+
 class ReindexJob(BaseModel):
     job_id: str
     status: Literal["running", "completed", "completed_with_errors", "failed"]

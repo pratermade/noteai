@@ -1,6 +1,60 @@
 /* Notes RAG — main app */
 
 const API = '';
+
+// ── Auth state ─────────────────────────────────────────────────────────────
+let _token = localStorage.getItem('auth_token') || null;
+
+function showLoginOverlay() {
+  const overlay = $('login-overlay');
+  if (overlay) overlay.style.display = 'flex';
+}
+
+function hideLoginOverlay() {
+  const overlay = $('login-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+async function login(username, password) {
+  const res = await fetch(API + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) {
+    let detail = 'Login failed';
+    try { detail = (await res.json()).detail ?? detail; } catch {}
+    throw new Error(detail);
+  }
+  const data = await res.json();
+  _token = data.token;
+  localStorage.setItem('auth_token', _token);
+  const usernameEl = $('sidebar-username');
+  if (usernameEl) usernameEl.textContent = data.username;
+  hideLoginOverlay();
+  await updatePwaManifest();
+  await init();
+}
+
+function logout() {
+  _token = null;
+  localStorage.removeItem('auth_token');
+  showLoginOverlay();
+}
+
+async function updatePwaManifest() {
+  try {
+    const res = await fetch(API + '/api/manifest', {
+      headers: _token ? { 'Authorization': 'Bearer ' + _token } : {},
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const blob = new Blob([JSON.stringify(data)], { type: 'application/manifest+json' });
+    const manifestLink = $('pwa-manifest');
+    if (manifestLink) manifestLink.href = URL.createObjectURL(blob);
+  } catch {}
+}
+
 let state = {
   notes: [],
   currentNoteId: null,
@@ -82,7 +136,14 @@ function toast(msg, type = '') {
 // ── API helpers ────────────────────────────────────────────────────────────
 
 async function apiFetch(path, opts = {}) {
+  if (_token) {
+    opts.headers = Object.assign({ 'Authorization': 'Bearer ' + _token }, opts.headers || {});
+  }
   const res = await fetch(API + path, opts);
+  if (res.status === 401) {
+    logout();
+    throw new Error('Session expired. Please sign in again.');
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail ?? detail; } catch {}
@@ -1224,4 +1285,47 @@ async function init() {
   }
 }
 
-init();
+// ── Auth bootstrap ─────────────────────────────────────────────────────────
+
+const loginForm = $('login-form');
+if (loginForm) {
+  loginForm.addEventListener('submit', async e => {
+    e.preventDefault();
+    const username = $('login-username').value.trim();
+    const password = $('login-password').value;
+    const errEl = $('login-error');
+    const submitBtn = $('login-submit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Signing in…';
+    errEl.style.display = 'none';
+    try {
+      await login(username, password);
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.style.display = 'block';
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Sign in';
+    }
+  });
+}
+
+const logoutBtn = $('btn-logout');
+if (logoutBtn) logoutBtn.addEventListener('click', logout);
+
+// Check session on load
+(async () => {
+  if (!_token) {
+    showLoginOverlay();
+    return;
+  }
+  try {
+    const user = await apiFetch('/api/auth/me');
+    const usernameEl = $('sidebar-username');
+    if (usernameEl) usernameEl.textContent = user.username;
+    await updatePwaManifest();
+    await init();
+  } catch {
+    showLoginOverlay();
+  }
+})();

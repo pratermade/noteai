@@ -15,3 +15,5 @@ python-json-logger
 youtube-transcript-api
 python-telegram-bot>=21.0
 apscheduler>=3.10.0
+bcrypt
+PyJWT
