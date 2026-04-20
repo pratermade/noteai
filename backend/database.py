@@ -16,8 +16,18 @@ def _now() -> str:
 
 async def init_db(db: aiosqlite.Connection) -> None:
     await db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            share_key TEXT UNIQUE NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    await db.execute("""
         CREATE TABLE IF NOT EXISTS notes (
             id TEXT PRIMARY KEY,
+            user_id TEXT REFERENCES users(id),
             title TEXT NOT NULL,
             content TEXT NOT NULL,
             tags TEXT NOT NULL DEFAULT '[]',
@@ -47,9 +57,23 @@ async def init_db(db: aiosqlite.Connection) -> None:
             created_at TEXT NOT NULL
         )
     """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id TEXT NOT NULL REFERENCES users(id),
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (user_id, key)
+        )
+    """)
     await db.commit()
 
-    # Migration: add columns for databases created before these fields existed
+    # ── Column migrations ──────────────────────────────────────────────────────
     async with db.execute("PRAGMA table_info(attachments)") as cur:
         att_cols = {row[1] for row in await cur.fetchall()}
     if "summary" not in att_cols:
@@ -58,24 +82,19 @@ async def init_db(db: aiosqlite.Connection) -> None:
 
     async with db.execute("PRAGMA table_info(notes)") as cur:
         note_cols = {row[1] for row in await cur.fetchall()}
-    if "note_type" not in note_cols:
-        await db.execute("ALTER TABLE notes ADD COLUMN note_type TEXT NOT NULL DEFAULT 'markdown'")
-    if "note_summary" not in note_cols:
-        await db.execute("ALTER TABLE notes ADD COLUMN note_summary TEXT")
-    if "reminder_at" not in note_cols:
-        await db.execute("ALTER TABLE notes ADD COLUMN reminder_at TEXT")
-    if "reminder_done" not in note_cols:
-        await db.execute("ALTER TABLE notes ADD COLUMN reminder_done INTEGER NOT NULL DEFAULT 0")
-    if any(c not in note_cols for c in ("note_type", "note_summary", "reminder_at", "reminder_done")):
+    added = False
+    for col, definition in [
+        ("note_type", "TEXT NOT NULL DEFAULT 'markdown'"),
+        ("note_summary", "TEXT"),
+        ("reminder_at", "TEXT"),
+        ("reminder_done", "INTEGER NOT NULL DEFAULT 0"),
+        ("user_id", "TEXT REFERENCES users(id)"),
+    ]:
+        if col not in note_cols:
+            await db.execute(f"ALTER TABLE notes ADD COLUMN {col} {definition}")
+            added = True
+    if added:
         await db.commit()
-
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-    """)
-    await db.commit()
 
 
 def _row_to_note(row: aiosqlite.Row) -> NoteResponse:
@@ -120,35 +139,111 @@ async def get_db() -> aiosqlite.Connection:
     return db
 
 
-# Notes
+# ---------------------------------------------------------------------------
+# Users
+# ---------------------------------------------------------------------------
 
-async def create_note(db: aiosqlite.Connection, title: str, content: str,
+async def create_user(db: aiosqlite.Connection, username: str, password_hash: str,
+                      share_key: str) -> dict:
+    user_id = str(uuid.uuid4())
+    now = _now()
+    await db.execute(
+        "INSERT INTO users (id, username, password_hash, share_key, created_at) VALUES (?,?,?,?,?)",
+        (user_id, username, password_hash, share_key, now),
+    )
+    await db.commit()
+    return {"id": user_id, "username": username, "share_key": share_key, "created_at": now}
+
+
+async def get_user_by_username(db: aiosqlite.Connection, username: str) -> dict | None:
+    async with db.execute(
+        "SELECT id, username, password_hash, share_key, created_at FROM users WHERE username = ?",
+        (username,),
+    ) as cur:
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "username": row["username"], "password_hash": row["password_hash"],
+            "share_key": row["share_key"], "created_at": row["created_at"]}
+
+
+async def get_user_by_id(db: aiosqlite.Connection, user_id: str) -> dict | None:
+    async with db.execute(
+        "SELECT id, username, password_hash, share_key, created_at FROM users WHERE id = ?",
+        (user_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "username": row["username"], "password_hash": row["password_hash"],
+            "share_key": row["share_key"], "created_at": row["created_at"]}
+
+
+async def get_user_by_share_key(db: aiosqlite.Connection, share_key: str) -> dict | None:
+    async with db.execute(
+        "SELECT id, username, share_key, created_at FROM users WHERE share_key = ?",
+        (share_key,),
+    ) as cur:
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "username": row["username"], "share_key": row["share_key"],
+            "created_at": row["created_at"]}
+
+
+async def get_first_user(db: aiosqlite.Connection) -> dict | None:
+    async with db.execute(
+        "SELECT id, username, share_key, created_at FROM users ORDER BY created_at ASC LIMIT 1"
+    ) as cur:
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "username": row["username"], "share_key": row["share_key"],
+            "created_at": row["created_at"]}
+
+
+# ---------------------------------------------------------------------------
+# Notes
+# ---------------------------------------------------------------------------
+
+async def create_note(db: aiosqlite.Connection, user_id: str, title: str, content: str,
                       tags: list[str], folder: str,
                       note_type: str = 'markdown',
                       reminder_at: str | None = None) -> NoteResponse:
     note_id = str(uuid.uuid4())
     now = _now()
     await db.execute(
-        "INSERT INTO notes (id, title, content, tags, folder, created_at, updated_at, note_type, reminder_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (note_id, title, content, json.dumps(tags), folder, now, now, note_type, reminder_at),
+        "INSERT INTO notes (id, user_id, title, content, tags, folder, created_at, updated_at, note_type, reminder_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (note_id, user_id, title, content, json.dumps(tags), folder, now, now, note_type, reminder_at),
     )
     await db.commit()
-    return await get_note(db, note_id)
+    return await get_note(db, note_id, user_id)
 
 
-async def get_note(db: aiosqlite.Connection, note_id: str) -> NoteResponse | None:
-    async with db.execute("SELECT * FROM notes WHERE id = ?", (note_id,)) as cur:
-        row = await cur.fetchone()
+async def get_note(db: aiosqlite.Connection, note_id: str,
+                   user_id: str | None = None) -> NoteResponse | None:
+    if user_id:
+        async with db.execute(
+            "SELECT * FROM notes WHERE id = ? AND user_id = ?", (note_id, user_id)
+        ) as cur:
+            row = await cur.fetchone()
+    else:
+        async with db.execute("SELECT * FROM notes WHERE id = ?", (note_id,)) as cur:
+            row = await cur.fetchone()
     return _row_to_note(row) if row else None
 
 
-async def list_notes(db: aiosqlite.Connection, tag: str | None = None,
+async def list_notes(db: aiosqlite.Connection, user_id: str | None = None,
+                     tag: str | None = None,
                      folder: str | None = None) -> list[NoteResponse]:
     query = "SELECT * FROM notes"
     params: list = []
     conditions = []
+    if user_id:
+        conditions.append("user_id = ?")
+        params.append(user_id)
     if tag:
-        # JSON array contains check
         conditions.append("EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)")
         params.append(tag)
     if folder is not None:
@@ -162,21 +257,32 @@ async def list_notes(db: aiosqlite.Connection, tag: str | None = None,
     return [_row_to_note(r) for r in rows]
 
 
-async def update_note(db: aiosqlite.Connection, note_id: str, **fields) -> NoteResponse | None:
+async def update_note(db: aiosqlite.Connection, note_id: str,
+                      user_id: str | None = None, **fields) -> NoteResponse | None:
     if not fields:
-        return await get_note(db, note_id)
+        return await get_note(db, note_id, user_id)
     fields["updated_at"] = _now()
     if "tags" in fields:
         fields["tags"] = json.dumps(fields["tags"])
     sets = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [note_id]
-    await db.execute(f"UPDATE notes SET {sets} WHERE id = ?", values)
+    if user_id:
+        await db.execute(f"UPDATE notes SET {sets} WHERE id = ? AND user_id = ?",
+                         values + [user_id])
+    else:
+        await db.execute(f"UPDATE notes SET {sets} WHERE id = ?", values)
     await db.commit()
-    return await get_note(db, note_id)
+    return await get_note(db, note_id, user_id)
 
 
-async def delete_note(db: aiosqlite.Connection, note_id: str) -> bool:
-    cur = await db.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+async def delete_note(db: aiosqlite.Connection, note_id: str,
+                      user_id: str | None = None) -> bool:
+    if user_id:
+        cur = await db.execute(
+            "DELETE FROM notes WHERE id = ? AND user_id = ?", (note_id, user_id)
+        )
+    else:
+        cur = await db.execute("DELETE FROM notes WHERE id = ?", (note_id,))
     await db.commit()
     return cur.rowcount > 0
 
@@ -201,11 +307,19 @@ async def set_note_summary(db: aiosqlite.Connection, note_id: str, summary: str)
     await db.commit()
 
 
-async def list_tags(db: aiosqlite.Connection) -> list[str]:
-    async with db.execute(
-        "SELECT DISTINCT value FROM notes, json_each(notes.tags) ORDER BY value"
-    ) as cur:
-        rows = await cur.fetchall()
+async def list_tags(db: aiosqlite.Connection, user_id: str | None = None) -> list[str]:
+    if user_id:
+        async with db.execute(
+            "SELECT DISTINCT value FROM notes, json_each(notes.tags)"
+            " WHERE notes.user_id = ? ORDER BY value",
+            (user_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+    else:
+        async with db.execute(
+            "SELECT DISTINCT value FROM notes, json_each(notes.tags) ORDER BY value"
+        ) as cur:
+            rows = await cur.fetchall()
     return [r[0] for r in rows]
 
 
@@ -213,30 +327,49 @@ async def list_folders(db: aiosqlite.Connection) -> list[str]:
     return FOLDERS
 
 
-async def get_due_reminders(db: aiosqlite.Connection, today: str) -> list[dict]:
-    async with db.execute(
-        "SELECT id, title, reminder_at FROM notes WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
-        (today,),
-    ) as cur:
-        rows = await cur.fetchall()
+async def get_due_reminders(db: aiosqlite.Connection, today: str,
+                             user_id: str | None = None) -> list[dict]:
+    if user_id:
+        async with db.execute(
+            "SELECT id, title, reminder_at FROM notes"
+            " WHERE user_id = ? AND reminder_at <= ? AND reminder_done = 0"
+            " ORDER BY reminder_at",
+            (user_id, today),
+        ) as cur:
+            rows = await cur.fetchall()
+    else:
+        async with db.execute(
+            "SELECT id, title, reminder_at FROM notes"
+            " WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+            (today,),
+        ) as cur:
+            rows = await cur.fetchall()
     return [{"id": r["id"], "title": r["title"], "reminder_at": r["reminder_at"]} for r in rows]
 
 
-async def list_next_tasks(db: aiosqlite.Connection, limit: int = 10) -> list[NoteResponse]:
-    async with db.execute(
-        """
-        SELECT * FROM notes
-        WHERE reminder_at IS NOT NULL AND reminder_done = 0
-        ORDER BY reminder_at ASC
-        LIMIT ?
-        """,
-        (limit,),
-    ) as cur:
-        rows = await cur.fetchall()
+async def list_next_tasks(db: aiosqlite.Connection, limit: int = 10,
+                          user_id: str | None = None) -> list[NoteResponse]:
+    if user_id:
+        async with db.execute(
+            "SELECT * FROM notes"
+            " WHERE user_id = ? AND reminder_at IS NOT NULL AND reminder_done = 0"
+            " ORDER BY reminder_at ASC LIMIT ?",
+            (user_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+    else:
+        async with db.execute(
+            "SELECT * FROM notes WHERE reminder_at IS NOT NULL AND reminder_done = 0"
+            " ORDER BY reminder_at ASC LIMIT ?",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
     return [_row_to_note(r) for r in rows]
 
 
+# ---------------------------------------------------------------------------
 # Attachments
+# ---------------------------------------------------------------------------
 
 async def create_attachment(db: aiosqlite.Connection, note_id: str, filename: str,
                              mime_type: str, size_bytes: int,
@@ -293,7 +426,22 @@ async def get_attachment_extracted_text(db: aiosqlite.Connection, att_id: str) -
     return row[0] if row else None
 
 
-async def get_setting(db: aiosqlite.Connection, key: str, default: str | None = None) -> str | None:
+async def list_indexed_attachments(db: aiosqlite.Connection,
+                                    note_id: str) -> list[AttachmentResponse]:
+    async with db.execute(
+        "SELECT * FROM attachments WHERE note_id = ? AND extracted_at IS NOT NULL",
+        (note_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [_row_to_attachment(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Global settings (app_settings) — Telegram config, bot_user_id, etc.
+# ---------------------------------------------------------------------------
+
+async def get_setting(db: aiosqlite.Connection, key: str,
+                      default: str | None = None) -> str | None:
     async with db.execute("SELECT value FROM app_settings WHERE key = ?", (key,)) as cur:
         row = await cur.fetchone()
     return row[0] if row else default
@@ -308,11 +456,24 @@ async def set_setting(db: aiosqlite.Connection, key: str, value: str) -> None:
     await db.commit()
 
 
-async def list_indexed_attachments(db: aiosqlite.Connection,
-                                    note_id: str) -> list[AttachmentResponse]:
+# ---------------------------------------------------------------------------
+# Per-user settings (user_settings) — timezone, reminders, character prompt
+# ---------------------------------------------------------------------------
+
+async def get_user_setting(db: aiosqlite.Connection, user_id: str, key: str,
+                            default: str | None = None) -> str | None:
     async with db.execute(
-        "SELECT * FROM attachments WHERE note_id = ? AND extracted_at IS NOT NULL",
-        (note_id,),
+        "SELECT value FROM user_settings WHERE user_id = ? AND key = ?", (user_id, key)
     ) as cur:
-        rows = await cur.fetchall()
-    return [_row_to_attachment(r) for r in rows]
+        row = await cur.fetchone()
+    return row[0] if row else default
+
+
+async def set_user_setting(db: aiosqlite.Connection, user_id: str, key: str,
+                            value: str) -> None:
+    await db.execute(
+        "INSERT INTO user_settings (user_id, key, value) VALUES (?, ?, ?)"
+        " ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+        (user_id, key, value),
+    )
+    await db.commit()
