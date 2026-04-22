@@ -394,6 +394,11 @@ body {
   outline: none;
   border-color: var(--accent);
 }
+.settings-error {
+  color: var(--danger);
+  font-size: 13px;
+  margin-top: 8px;
+}
 .settings-section-footer {
   display: flex;
   justify-content: flex-end;

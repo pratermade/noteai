@@ -30,9 +30,9 @@ from . import database as db
 from . import embeddings, vector_store, wyoming_client
 from .chunker import chunk_text
 from .models import (
-    AttachmentResponse, FOLDERS, LoginRequest, NoteCreate, NoteResponse, NoteUpdate,
-    ReindexJob, SearchRequest, SearchResult, SettingsPatch, SettingsResponse,
-    TokenResponse, UserResponse,
+    AttachmentResponse, ChangePasswordRequest, FOLDERS, LoginRequest, NoteCreate,
+    NoteResponse, NoteUpdate, ReindexJob, SearchRequest, SearchResult, SettingsPatch,
+    SettingsResponse, TokenResponse, UserResponse,
 )
 from .pdf_extractor import ExtractionError as PDFExtractionError, extract as pdf_extract
 from .web_extractor import ExtractionError as WebExtractionError, extract_url, get_youtube_video_id
@@ -502,6 +502,19 @@ async def login(body: LoginRequest, conn: DB):
 @app.get("/api/auth/me", response_model=UserResponse)
 async def me(current_user: CurrentUser):
     return UserResponse(**current_user)
+
+
+@app.post("/api/auth/change-password", status_code=204)
+async def change_password(body: ChangePasswordRequest, current_user: CurrentUser, conn: DB):
+    user = await db.get_user_by_username(conn, current_user["username"])
+    if not user or not verify_password(body.current_password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    new_hash = hash_password(body.new_password)
+    await conn.execute(
+        "UPDATE users SET password_hash = ? WHERE id = ?",
+        (new_hash, current_user["id"]),
+    )
+    await conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -1338,19 +1351,8 @@ async def service_worker():
     )
 
 
-@app.get("/manifest.json", include_in_schema=False)
-async def manifest():
-    """Unauthenticated manifest — no share_target. Used before login and as install fallback."""
-    return JSONResponse(content=_BASE_MANIFEST, media_type="application/manifest+json")
-
-
-@app.get("/api/manifest", include_in_schema=False)
-async def user_manifest(current_user: CurrentUser, conn: DB):
-    """Authenticated manifest — includes per-user share_target with share_key."""
-    user = await db.get_user_by_id(conn, current_user["id"])
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    share_url = f"{settings.app_base_url}/api/share?key={user['share_key']}"
+def _build_user_manifest(share_key: str) -> dict:
+    share_url = f"{settings.app_base_url}/api/share?key={share_key}"
     manifest_data = dict(_BASE_MANIFEST)
     manifest_data["share_target"] = {
         "action": share_url,
@@ -1363,7 +1365,31 @@ async def user_manifest(current_user: CurrentUser, conn: DB):
             "files": [{"name": "file", "accept": ["application/pdf"]}],
         },
     }
-    return JSONResponse(content=manifest_data, media_type="application/manifest+json")
+    return manifest_data
+
+
+@app.get("/manifest.json", include_in_schema=False)
+async def manifest():
+    """Base manifest — no share_target. Used for PWA install prompt before login."""
+    return JSONResponse(content=_BASE_MANIFEST, media_type="application/manifest+json")
+
+
+@app.get("/manifest/{share_key}.json", include_in_schema=False)
+async def user_manifest_by_key(share_key: str, conn: DB):
+    """Stable per-user manifest with share_target. Safe to set as <link rel=manifest> after login."""
+    user = await db.get_user_by_share_key(conn, share_key)
+    if not user:
+        raise HTTPException(status_code=404)
+    return JSONResponse(content=_build_user_manifest(share_key), media_type="application/manifest+json")
+
+
+@app.get("/api/manifest", include_in_schema=False)
+async def api_manifest(current_user: CurrentUser, conn: DB):
+    """Returns the current user's share_key so the frontend can build their manifest URL."""
+    user = await db.get_user_by_id(conn, current_user["id"])
+    if not user:
+        raise HTTPException(status_code=404)
+    return {"share_key": user["share_key"]}
 
 
 # ---------------------------------------------------------------------------
