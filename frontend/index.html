@@ -191,6 +191,28 @@
         </div>
       </section>
       <section class="settings-section">
+        <h2>Change Password</h2>
+        <div class="settings-fields">
+          <div class="settings-field">
+            <label>Current Password</label>
+            <input id="cp-current" type="password" autocomplete="current-password" />
+          </div>
+          <div class="settings-field">
+            <label>New Password</label>
+            <input id="cp-new" type="password" autocomplete="new-password" />
+          </div>
+          <div class="settings-field">
+            <label>Confirm New Password</label>
+            <input id="cp-confirm" type="password" autocomplete="new-password" />
+          </div>
+        </div>
+
+        <div id="cp-error" class="settings-error" style="display:none"></div>
+        <div class="settings-section-footer">
+          <button id="btn-change-password" class="btn-secondary">Change Password</button>
+        </div>
+      </section>
+      <section class="settings-section">
         <h2>Telegram Bot</h2>
         <p class="settings-hint">Restart the Telegram bot after saving for changes to take effect.</p>
         <div class="settings-fields">

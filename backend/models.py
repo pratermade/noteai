@@ -150,6 +150,11 @@ class UserResponse(BaseModel):
     created_at: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class ReindexJob(BaseModel):
     job_id: str
     status: Literal["running", "completed", "completed_with_errors", "failed"]

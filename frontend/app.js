@@ -5,6 +5,14 @@ const API = '';
 // ── Auth state ─────────────────────────────────────────────────────────────
 let _token = localStorage.getItem('auth_token') || null;
 
+// Capture the install prompt so we can defer it until after login (ensuring the
+// per-user manifest with share_target is in place before Chrome installs the PWA).
+let _deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  _deferredInstallPrompt = e;
+});
+
 function showLoginOverlay() {
   const overlay = $('login-overlay');
   if (overlay) overlay.style.display = 'flex';
@@ -33,25 +41,58 @@ async function login(username, password) {
   if (usernameEl) usernameEl.textContent = data.username;
   hideLoginOverlay();
   await updatePwaManifest();
+  if (_deferredInstallPrompt) {
+    _deferredInstallPrompt.prompt();
+    _deferredInstallPrompt = null;
+  }
   await init();
 }
 
 function logout() {
   _token = null;
   localStorage.removeItem('auth_token');
+  _clearShareKey();
   showLoginOverlay();
+}
+
+async function _storeShareKey(shareKey) {
+  return new Promise(resolve => {
+    const req = indexedDB.open('noterai-sw', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onsuccess = () => {
+      const tx = req.result.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(shareKey, 'share_key');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    };
+    req.onerror = () => resolve();
+  });
+}
+
+async function _clearShareKey() {
+  return new Promise(resolve => {
+    const req = indexedDB.open('noterai-sw', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onsuccess = () => {
+      const tx = req.result.transaction('kv', 'readwrite');
+      tx.objectStore('kv').delete('share_key');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    };
+    req.onerror = () => resolve();
+  });
 }
 
 async function updatePwaManifest() {
   try {
-    const res = await fetch(API + '/api/manifest', {
-      headers: _token ? { 'Authorization': 'Bearer ' + _token } : {},
-    });
-    if (!res.ok) return;
-    const data = await res.json();
-    const blob = new Blob([JSON.stringify(data)], { type: 'application/manifest+json' });
-    const manifestLink = $('pwa-manifest');
-    if (manifestLink) manifestLink.href = URL.createObjectURL(blob);
+    const data = await apiFetch('/api/manifest');
+    if (data.share_key) {
+      await _storeShareKey(data.share_key);
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) await reg.update();
+      const link = document.querySelector('link[rel="manifest"]');
+      if (link) link.href = `/manifest/${data.share_key}.json`;
+    }
   } catch {}
 }
 
@@ -314,6 +355,7 @@ async function openNote(id) {
     renderSummarySection();
     setEditMode(false);
     setBadge('');
+    settingsView.style.display    = 'none';
     editorPanel.style.display = 'flex';
     editorPanel.style.flexDirection = 'column';
     noteListPanel.style.display = 'none';
@@ -388,7 +430,7 @@ tagInput.addEventListener('keydown', e => {
 async function saveNote() {
   const title       = titleInput.value.trim() || 'Untitled';
   const content     = contentArea.value;
-  const folder      = folderInput.value.trim();
+  const folder      = folderInput.value.trim() || 'Unfiled';
   const tags        = getCurrentTags();
   const reminder_at = reminderInput.value || null;
   const reminder_done = state.reminderDone;
@@ -531,6 +573,7 @@ async function openTasksPanel() {
   clearTimers();
   state.currentNoteId = null;
   state.tasksMode = true;
+  settingsView.style.display    = 'none';
   editorPanel.style.display = 'none';
   noteListPanel.style.display = 'none';
   $('tasks-panel').style.display = 'flex';
@@ -618,6 +661,7 @@ function setFilter(tag, folder) {
   state.tasksMode = false;
   $('tasks-panel').style.display = 'none';
   $('btn-tasks').classList.remove('active');
+  settingsView.style.display    = 'none';
   searchInput.value = '';
   state.searchMode = false;
   noteListPanel.style.display = 'flex';
@@ -982,6 +1026,7 @@ $('btn-new-note').addEventListener('click', () => {
   attList.innerHTML = '';
   notePreview.innerHTML = '';
   state.tasksMode = false;
+  settingsView.style.display    = 'none';
   $('tasks-panel').style.display = 'none';
   $('btn-tasks').classList.remove('active');
   editorPanel.style.display = 'flex';
@@ -1213,6 +1258,39 @@ $('btn-settings-save').addEventListener('click', async () => {
     };
   } catch (e) {
     toast('Save failed: ' + e.message, 'error');
+  }
+});
+
+const cpChangeBtn = $('btn-change-password');
+if (cpChangeBtn) cpChangeBtn.addEventListener('click', async () => {
+  const current = $('cp-current').value;
+  const newPw   = $('cp-new').value;
+  const confirm = $('cp-confirm').value;
+  const errEl   = $('cp-error');
+  const showErr = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
+  errEl.style.display = 'none';
+  if (!current || !newPw || !confirm) { showErr('Fill in all three fields.'); return; }
+  if (newPw !== confirm) { showErr('New passwords do not match.'); return; }
+  if (newPw.length < 6)  { showErr('New password must be at least 6 characters.'); return; }
+  const btn = $('btn-change-password');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    await apiFetch('/api/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: current, new_password: newPw }),
+    });
+    $('cp-current').value = '';
+    $('cp-new').value = '';
+    $('cp-confirm').value = '';
+    errEl.style.display = 'none';
+    toast('Password changed.', 'success');
+  } catch (e) {
+    showErr(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Change Password';
   }
 });
 
