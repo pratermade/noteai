@@ -69,12 +69,31 @@ def restricted(func):
 # RAG API
 # ---------------------------------------------------------------------------
 
+async def _get_bot_user_id() -> str | None:
+    """Return the user_id the bot operates as (stored in global app_settings)."""
+    try:
+        import sqlite3
+        with sqlite3.connect(settings.database_url) as conn:
+            cur = conn.execute("SELECT value FROM app_settings WHERE key = 'bot_user_id'")
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception as exc:
+        logger.warning("Could not read bot_user_id: %s", exc)
+        return None
+
+
 async def query_rag(messages: list[dict], skip_reminders: bool = False) -> str:
+    bot_user_id = await _get_bot_user_id()
+    payload: dict = {
+        "model": TELEGRAM_RAG_MODEL,
+        "messages": messages,
+        "stream": False,
+        "skip_reminders": skip_reminders,
+    }
+    if bot_user_id:
+        payload["user_id"] = bot_user_id
     async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(
-            f"{TELEGRAM_RAG_URL}/v1/chat/completions",
-            json={"model": TELEGRAM_RAG_MODEL, "messages": messages, "stream": False, "skip_reminders": skip_reminders},
-        )
+        resp = await client.post(f"{TELEGRAM_RAG_URL}/v1/chat/completions", json=payload)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
 
@@ -186,19 +205,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ---------------------------------------------------------------------------
 
 async def send_scheduled_reminder(bot) -> None:
-    char_prompt = await _get_character_prompt()
-    tz = await _get_timezone()
+    bot_user_id = await _get_bot_user_id()
+    char_prompt = await _get_character_prompt(bot_user_id)
+    tz = await _get_timezone(bot_user_id)
     now_str = (datetime.now(tz) if tz else datetime.now()).strftime("%A, %B %-d %Y, %H:%M")
     today = (datetime.now(tz) if tz else datetime.now()).strftime("%Y-%m-%d")
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
-            async with conn.execute(
-                "SELECT title, reminder_at FROM notes "
-                "WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
-                (today,),
-            ) as cur:
-                rows = await cur.fetchall()
+            if bot_user_id:
+                async with conn.execute(
+                    "SELECT title, reminder_at FROM notes "
+                    "WHERE user_id = ? AND reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+                    (bot_user_id, today),
+                ) as cur:
+                    rows = await cur.fetchall()
+            else:
+                async with conn.execute(
+                    "SELECT title, reminder_at FROM notes "
+                    "WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+                    (today,),
+                ) as cur:
+                    rows = await cur.fetchall()
     except Exception as exc:
         logger.error("Failed to fetch due tasks: %s", exc)
         return
@@ -264,14 +292,22 @@ async def send_scheduled_reminder(bot) -> None:
         logger.error("Scheduled reminder failed: %s", exc)
 
 
-async def _get_timezone() -> ZoneInfo | None:
-    """Read server_timezone from DB (or TZ env var) and return a ZoneInfo, or None for system local."""
+def _user_setting_sql(user_id: str | None, key: str) -> tuple[str, tuple]:
+    if user_id:
+        return (
+            "SELECT value FROM user_settings WHERE user_id = ? AND key = ?",
+            (user_id, key),
+        )
+    return ("SELECT value FROM app_settings WHERE key = ?", (key,))
+
+
+async def _get_timezone(user_id: str | None = None) -> ZoneInfo | None:
+    """Read server_timezone from user_settings (or app_settings fallback) and return a ZoneInfo."""
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
-            async with conn.execute(
-                "SELECT value FROM app_settings WHERE key = 'server_timezone'"
-            ) as cur:
+            sql, params = _user_setting_sql(user_id, "server_timezone")
+            async with conn.execute(sql, params) as cur:
                 row = await cur.fetchone()
             tz_str = (row[0].strip() if row and row[0] else "") or os.environ.get("TZ", "")
         if tz_str:
@@ -283,14 +319,13 @@ async def _get_timezone() -> ZoneInfo | None:
     return None
 
 
-async def _get_reminder_times() -> list[tuple[int, int]]:
+async def _get_reminder_times(user_id: str | None = None) -> list[tuple[int, int]]:
     """Return configured reminder times as (hour, minute) tuples from the DB."""
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
-            async with conn.execute(
-                "SELECT value FROM app_settings WHERE key = 'reminder_times'"
-            ) as cur:
+            sql, params = _user_setting_sql(user_id, "reminder_times")
+            async with conn.execute(sql, params) as cur:
                 row = await cur.fetchone()
             if row:
                 result = []
@@ -301,9 +336,8 @@ async def _get_reminder_times() -> list[tuple[int, int]]:
                         result.append((int(h), int(m)))
                 return result
             # Fall back to legacy reminder_hours
-            async with conn.execute(
-                "SELECT value FROM app_settings WHERE key = 'reminder_hours'"
-            ) as cur:
+            sql2, params2 = _user_setting_sql(user_id, "reminder_hours")
+            async with conn.execute(sql2, params2) as cur:
                 row = await cur.fetchone()
             if row:
                 return [(int(h.strip()), 0) for h in row[0].split(",") if h.strip()]
@@ -312,14 +346,13 @@ async def _get_reminder_times() -> list[tuple[int, int]]:
     return []
 
 
-async def _get_journal_reminder_times() -> list[tuple[int, int]]:
+async def _get_journal_reminder_times(user_id: str | None = None) -> list[tuple[int, int]]:
     """Return configured journal reminder times from DB. Empty list = user hasn't opted in."""
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
-            async with conn.execute(
-                "SELECT value FROM app_settings WHERE key = 'journal_reminder_times'"
-            ) as cur:
+            sql, params = _user_setting_sql(user_id, "journal_reminder_times")
+            async with conn.execute(sql, params) as cur:
                 row = await cur.fetchone()
             if row and row[0].strip():
                 result = []
@@ -334,13 +367,12 @@ async def _get_journal_reminder_times() -> list[tuple[int, int]]:
     return []
 
 
-async def _get_character_prompt() -> str:
+async def _get_character_prompt(user_id: str | None = None) -> str:
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
-            async with conn.execute(
-                "SELECT value FROM app_settings WHERE key = 'character_prompt'"
-            ) as cur:
+            sql, params = _user_setting_sql(user_id, "character_prompt")
+            async with conn.execute(sql, params) as cur:
                 row = await cur.fetchone()
             if row and row[0].strip():
                 return row[0].strip()
@@ -351,18 +383,27 @@ async def _get_character_prompt() -> str:
 
 async def _check_and_send_journal_reminder(bot) -> None:
     """Check if a journal entry exists for today; nudge the user if not."""
-    char_prompt = await _get_character_prompt()
-    tz = await _get_timezone()
+    bot_user_id = await _get_bot_user_id()
+    char_prompt = await _get_character_prompt(bot_user_id)
+    tz = await _get_timezone(bot_user_id)
     now_str = (datetime.now(tz) if tz else datetime.now()).strftime("%A, %B %-d %Y, %H:%M")
     today = (datetime.now(tz) if tz else datetime.now()).strftime("%Y-%m-%d")
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
-            async with conn.execute(
-                "SELECT COUNT(*) FROM notes WHERE folder = 'Journal' AND substr(created_at, 1, 10) = ?",
-                (today,),
-            ) as cur:
-                row = await cur.fetchone()
-                count = row[0] if row else 0
+            if bot_user_id:
+                async with conn.execute(
+                    "SELECT COUNT(*) FROM notes WHERE user_id = ? AND folder = 'Journal'"
+                    " AND substr(created_at, 1, 10) = ?",
+                    (bot_user_id, today),
+                ) as cur:
+                    row = await cur.fetchone()
+            else:
+                async with conn.execute(
+                    "SELECT COUNT(*) FROM notes WHERE folder = 'Journal' AND substr(created_at, 1, 10) = ?",
+                    (today,),
+                ) as cur:
+                    row = await cur.fetchone()
+            count = row[0] if row else 0
     except Exception as exc:
         logger.error("Journal check failed: %s", exc)
         return
@@ -426,8 +467,9 @@ async def _reschedule_journal_reminders(bot) -> None:
         if job.id.startswith("journal_") and job.id != "journal_manager":
             _scheduler.remove_job(job.id)
 
-    times = await _get_journal_reminder_times()
-    tz = await _get_timezone()
+    bot_user_id = await _get_bot_user_id()
+    times = await _get_journal_reminder_times(bot_user_id)
+    tz = await _get_timezone(bot_user_id)
     for h, m in times:
         job_id = f"journal_{h:02d}{m:02d}"
         _scheduler.add_job(
@@ -448,8 +490,9 @@ async def _reschedule_reminders(bot) -> None:
         if job.id.startswith("reminder_") and job.id != "reminder_manager":
             _scheduler.remove_job(job.id)
 
-    times = await _get_reminder_times()
-    tz = await _get_timezone()
+    bot_user_id = await _get_bot_user_id()
+    times = await _get_reminder_times(bot_user_id)
+    tz = await _get_timezone(bot_user_id)
     for h, m in times:
         job_id = f"reminder_{h:02d}{m:02d}"
         _scheduler.add_job(
@@ -465,7 +508,8 @@ async def _reschedule_reminders(bot) -> None:
 async def post_init(application) -> None:
     global _scheduler
     _scheduler = AsyncIOScheduler()
-    tz = await _get_timezone()
+    bot_user_id = await _get_bot_user_id()
+    tz = await _get_timezone(bot_user_id)
     _scheduler.add_job(
         _reschedule_reminders,
         CronTrigger(minute="0,30", timezone=tz),

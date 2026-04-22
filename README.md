@@ -34,6 +34,39 @@ docker compose up -d
 
 The app listens on `https://0.0.0.0:8443` by default (HTTPS required for Android PWA).
 
+## First-time setup: creating users
+
+NoterAI requires at least one user account. On a fresh install, run:
+
+```bash
+# Create the admin user and migrate any existing notes/settings to it
+docker exec -it noterai python -m backend.create_user --username admin --migrate
+# You will be prompted to set a password
+```
+
+To add more users:
+
+```bash
+docker exec -it noterai python -m backend.create_user --username alice
+```
+
+To reset a forgotten password:
+
+```bash
+docker exec noterai python -c "
+import asyncio, aiosqlite, bcrypt
+async def reset():
+    async with aiosqlite.connect('/data/notes.db') as db:
+        h = bcrypt.hashpw(b'newpassword', bcrypt.gensalt()).decode()
+        await db.execute(\"UPDATE users SET password_hash=? WHERE username='admin'\", (h,))
+        await db.commit()
+        print('Password reset.')
+asyncio.run(reset())
+"
+```
+
+After creating users, open the app in your browser — you will be prompted to log in.
+
 ## Manual install
 
 ```bash
@@ -76,6 +109,8 @@ uvicorn backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem --host 0.
 | `CHAT_N_RESULTS` | `8` | Note chunks injected as RAG context per chat request |
 | `CHAT_PORT` | `8084` | Port for the RAG chat API service |
 | `WHISPER_BASE_URL` | `http://localhost:10300` | Wyoming faster-whisper TCP server address used for voice dictation |
+| `JWT_SECRET` | _(required)_ | Secret key for signing JWT auth tokens — generate with `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `JWT_EXPIRY_DAYS` | `30` | How many days a login token remains valid |
 
 ## How the RAG pipeline works
 
@@ -156,9 +191,12 @@ Install the mkcert root CA on your Android device to trust the certificate.
 
 ## Install on Android
 
-1. Open the app URL in Chrome on your Android device.
-2. Tap the three-dot menu → **Add to Home Screen**.
-3. Once installed, NoterAI appears in the Android share sheet — you can share URLs, text, and PDFs directly from any app.
+1. **Log in first** — the share target is registered per-user. You must be logged in before installing so Chrome captures the correct per-user manifest.
+2. Open the app URL in Chrome on your Android device.
+3. Tap the three-dot menu → **Add to Home Screen**.
+4. Once installed, NoterAI appears in the Android share sheet — you can share URLs, text, and PDFs directly from any app.
+
+> **Note — share target not appearing?** If you installed the PWA before logging in (or before the multi-user update), the registered manifest has no `share_target`. Uninstall the PWA from Android (long-press icon → Uninstall), log in via Chrome, then reinstall. Chrome must read the manifest *at install time* to register the share target; updating the installed app's manifest after the fact is unreliable across Chrome versions.
 
 ## Telegram Bot
 
@@ -198,32 +236,42 @@ Times are interpreted in the **Server Timezone** configured under **Settings →
 ```bash
 BASE=http://localhost:8889
 
+# Authenticate and capture token
+TOKEN=$(curl -s -X POST $BASE/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"changeme"}' | python -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
 # Create a note
 curl -X POST $BASE/api/notes \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"title":"My note","content":"Some content","tags":["work"],"folder":"Reference"}'
 
 # Semantic search
 curl -X POST $BASE/api/search \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"query":"content about projects","n_results":5}'
 
-# Simulate Android URL share
-curl -X POST $BASE/api/share \
+# Simulate Android URL share (uses share_key, no JWT needed)
+curl -X POST "$BASE/api/share?key=<your-share-key>" \
   -F 'title=Interesting article' \
   -F 'url=https://example.com/article'
 
 # Upload a PDF attachment
 curl -X POST $BASE/api/notes/<note-id>/attachments \
+  -H "Authorization: Bearer $TOKEN" \
   -F 'file=@/path/to/document.pdf'
 
 # Re-index a single note
-curl -X POST $BASE/api/notes/<note-id>/reindex
+curl -X POST $BASE/api/notes/<note-id>/reindex \
+  -H "Authorization: Bearer $TOKEN"
 
 # Re-index all notes
-curl -X POST $BASE/api/reindex
+curl -X POST $BASE/api/reindex \
+  -H "Authorization: Bearer $TOKEN"
 
-# Health check
+# Health check (unauthenticated)
 curl $BASE/health
 ```
 
