@@ -5,10 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NoterAI</title>
   <link rel="stylesheet" href="/style.css" />
-  <link rel="manifest" href="/manifest.json" />
+  <link id="pwa-manifest" rel="manifest" href="/manifest.json" />
   <meta name="theme-color" content="#4f46e5" />
 </head>
 <body>
+
+<!-- Login overlay -->
+<div id="login-overlay">
+  <div id="login-card">
+    <h1>NoterAI</h1>
+    <form id="login-form" autocomplete="on">
+      <div class="login-field">
+        <label for="login-username">Username</label>
+        <input id="login-username" type="text" name="username" autocomplete="username" required />
+      </div>
+      <div class="login-field">
+        <label for="login-password">Password</label>
+        <input id="login-password" type="password" name="password" autocomplete="current-password" required />
+      </div>
+      <button type="submit" id="login-submit">Sign in</button>
+      <div id="login-error" style="display:none"></div>
+    </form>
+  </div>
+</div>
 
 <!-- Mobile sidebar backdrop -->
 <div id="sidebar-backdrop"></div>
@@ -33,6 +52,10 @@
   <div id="sidebar-footer">
     <button id="reindex-all-btn">Reindex all notes</button>
     <div id="reindex-progress" style="display:none"></div>
+    <div id="sidebar-user">
+      <span id="sidebar-username"></span>
+      <button id="btn-logout">Sign out</button>
+    </div>
     <div id="build-number"></div>
   </div>
 </aside>
@@ -165,6 +188,28 @@
             <label>Character Prompt</label>
             <textarea id="character-prompt" rows="4" placeholder="You are Alfred, a dry witty butler assistant..."></textarea>
           </div>
+        </div>
+      </section>
+      <section class="settings-section">
+        <h2>Change Password</h2>
+        <div class="settings-fields">
+          <div class="settings-field">
+            <label>Current Password</label>
+            <input id="cp-current" type="password" autocomplete="current-password" />
+          </div>
+          <div class="settings-field">
+            <label>New Password</label>
+            <input id="cp-new" type="password" autocomplete="new-password" />
+          </div>
+          <div class="settings-field">
+            <label>Confirm New Password</label>
+            <input id="cp-confirm" type="password" autocomplete="new-password" />
+          </div>
+        </div>
+
+        <div id="cp-error" class="settings-error" style="display:none"></div>
+        <div class="settings-section-footer">
+          <button id="btn-change-password" class="btn-secondary">Change Password</button>
         </div>
       </section>
       <section class="settings-section">

@@ -80,18 +80,26 @@ def _headers() -> dict:
     return h
 
 
-async def _get_due_reminders() -> tuple[str, list[dict]]:
-    """Return (system_prompt_text, reminders_list) for all due/overdue reminders."""
+async def _get_due_reminders(user_id: str | None = None) -> tuple[str, list[dict]]:
+    """Return (system_prompt_text, reminders_list) for due/overdue reminders."""
     today = date.today().isoformat()
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
-            async with conn.execute(
-                "SELECT id, title, reminder_at FROM notes "
-                "WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
-                (today,),
-            ) as cur:
-                rows = await cur.fetchall()
+            if user_id:
+                async with conn.execute(
+                    "SELECT id, title, reminder_at FROM notes "
+                    "WHERE user_id = ? AND reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+                    (user_id, today),
+                ) as cur:
+                    rows = await cur.fetchall()
+            else:
+                async with conn.execute(
+                    "SELECT id, title, reminder_at FROM notes "
+                    "WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+                    (today,),
+                ) as cur:
+                    rows = await cur.fetchall()
         if not rows:
             return "", []
         items = [{"id": r["id"], "title": r["title"], "reminder_at": r["reminder_at"]} for r in rows]
@@ -107,13 +115,20 @@ async def _get_due_reminders() -> tuple[str, list[dict]]:
         return "", []
 
 
-async def _get_character_prompt() -> str:
+async def _get_character_prompt(user_id: str | None = None) -> str:
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
-            async with conn.execute(
-                "SELECT value FROM app_settings WHERE key = 'character_prompt'"
-            ) as cur:
-                row = await cur.fetchone()
+            if user_id:
+                async with conn.execute(
+                    "SELECT value FROM user_settings WHERE user_id = ? AND key = 'character_prompt'",
+                    (user_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+            else:
+                async with conn.execute(
+                    "SELECT value FROM app_settings WHERE key = 'character_prompt'"
+                ) as cur:
+                    row = await cur.fetchone()
             if row and row[0].strip():
                 return row[0].strip()
     except Exception:
@@ -177,7 +192,7 @@ async def _classify_folders(query: str) -> list[str]:
         return []
 
 
-async def _retrieve_context(query: str) -> tuple[str, list[dict]]:
+async def _retrieve_context(query: str, user_id: str | None = None) -> tuple[str, list[dict]]:
     """Embed the query, search ChromaDB, return (context_string, numbered_sources)."""
     try:
         emb_result, folders = await asyncio.gather(
@@ -186,10 +201,15 @@ async def _retrieve_context(query: str) -> tuple[str, list[dict]]:
         )
         emb = emb_result[0]
 
+        conditions: list[dict] = []
+        if user_id:
+            conditions.append({"user_id": {"$eq": user_id}})
         if folders:
-            where: dict | None = {"folder": {"$in": folders}}
+            conditions.append({"folder": {"$in": folders}})
         else:
-            where = {"folder": {"$ne": "Archive"}}
+            conditions.append({"folder": {"$ne": "Archive"}})
+
+        where: dict | None = {"$and": conditions} if len(conditions) > 1 else (conditions[0] if conditions else None)
 
         chunks = await vector_store.query(emb, settings.chat_n_results, where=where)
         if not chunks:
@@ -301,11 +321,11 @@ class ChatRequest(BaseModel):
     max_tokens: int | None = None
     temperature: float | None = None
     skip_reminders: bool = False
+    user_id: str | None = None
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(body: ChatRequest):
-    # RAG: embed the last user message to retrieve relevant note chunks
     user_msgs = [m for m in body.messages if m.role == "user"]
     query = user_msgs[-1].content if user_msgs else ""
 
@@ -316,9 +336,9 @@ async def chat_completions(body: ChatRequest):
         return "", []
 
     (context, sources), (reminders_text, reminders_list), character_prompt = await asyncio.gather(
-        _retrieve_context(query) if query else _no_context(),
-        _no_reminders() if body.skip_reminders else _get_due_reminders(),
-        _get_character_prompt(),
+        _retrieve_context(query, body.user_id) if query else _no_context(),
+        _no_reminders() if body.skip_reminders else _get_due_reminders(body.user_id),
+        _get_character_prompt(body.user_id),
     )
     reminders_md = _format_reminders_md(reminders_list)
     messages = _build_messages([m.model_dump() for m in body.messages], context, reminders_text, character_prompt)

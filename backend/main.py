@@ -24,13 +24,15 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from .auth import CurrentUser, get_current_user, hash_password, verify_password, create_token
 from .config import settings
 from . import database as db
 from . import embeddings, vector_store, wyoming_client
 from .chunker import chunk_text
 from .models import (
-    AttachmentResponse, FOLDERS, NoteCreate, NoteResponse, NoteUpdate,
-    ReindexJob, SearchRequest, SearchResult, SettingsPatch, SettingsResponse,
+    AttachmentResponse, ChangePasswordRequest, FOLDERS, LoginRequest, NoteCreate,
+    NoteResponse, NoteUpdate, ReindexJob, SearchRequest, SearchResult, SettingsPatch,
+    SettingsResponse, TokenResponse, UserResponse,
 )
 from .pdf_extractor import ExtractionError as PDFExtractionError, extract as pdf_extract
 from .web_extractor import ExtractionError as WebExtractionError, extract_url, get_youtube_video_id
@@ -48,9 +50,22 @@ _latest_job_id: str | None = None
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 ATTACHMENT_DIR = Path(settings.attachment_dir)
 
-# Read SW template at import time so the dynamic route can inject the version.
 _app_version = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
 _sw_template = (FRONTEND_DIR / "service_worker.js").read_text()
+
+# Base manifest content (no share_target — injected per-user via /api/manifest)
+_BASE_MANIFEST = {
+    "name": "NoterAI",
+    "short_name": "NoterAI",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#ffffff",
+    "theme_color": "#4f46e5",
+    "icons": [
+        {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+        {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+    ],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -59,40 +74,32 @@ _sw_template = (FRONTEND_DIR / "service_worker.js").read_text()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── Logging ──
     handler = logging.StreamHandler()
     handler.setFormatter(jsonlogger.JsonFormatter(
         fmt="%(asctime)s %(levelname)s %(name)s %(message)s"
     ))
     logging.root.setLevel(logging.INFO)
     logging.root.handlers = [handler]
-    # Emit DEBUG for the indexing pipeline without drowning in httpx/chromadb internals
     for mod in ("backend.main", "backend.embeddings", "backend.vector_store"):
         logging.getLogger(mod).setLevel(logging.DEBUG)
 
-    # Create attachment dir
     ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Remove any stale static manifest.json so the dynamic /manifest.json route
-    # always wins (old Docker image layers may contain this file).
     stale_manifest = FRONTEND_DIR / "manifest.json"
     if stale_manifest.exists():
         stale_manifest.unlink()
         logger.info("Removed stale frontend/manifest.json — served dynamically")
 
-    # Init DB
     async with aiosqlite.connect(settings.database_url) as conn:
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA foreign_keys = ON")
         await db.init_db(conn)
-        # Migrate legacy free-form folders to "Unfiled"
         placeholders = ",".join("?" * len(FOLDERS))
         await conn.execute(
             f"UPDATE notes SET folder = 'Unfiled' WHERE folder = '' OR folder NOT IN ({placeholders})",
             FOLDERS,
         )
         await conn.commit()
-        # Backfill summaries for existing attachments that have extracted text but no summary
         async with conn.execute(
             "SELECT id, extracted_text FROM attachments WHERE summary IS NULL AND extracted_text IS NOT NULL"
         ) as cur:
@@ -102,29 +109,25 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_backfill_summaries([(r[0], r[1]) for r in rows]))
     logger.info("SQLite initialised at %s", settings.database_url)
 
-    # Check ChromaDB
     try:
         await vector_store.get_collection()
-        logger.info(
-            "ChromaDB connected at %s:%s, collection=%s",
-            settings.chroma_host, settings.chroma_port, settings.chroma_collection,
-        )
+        logger.info("ChromaDB connected at %s:%s, collection=%s",
+                    settings.chroma_host, settings.chroma_port, settings.chroma_collection)
     except Exception as exc:
         logger.warning("ChromaDB not reachable at startup: %s", exc)
 
-    # Check embedding endpoint
     try:
         await embeddings.embed_texts(["ping"])
         logger.info("Embedding endpoint reachable at %s", settings.embedding_base_url)
     except Exception as exc:
         logger.warning("Embedding endpoint not reachable at startup: %s", exc)
 
-    # Check summary endpoint
     if settings.summary_base_url:
         try:
             client = _get_summary_client()
             resp = await client.get(f"{settings.summary_base_url}/v1/models", timeout=5.0)
-            logger.info("Summary endpoint reachable at %s (status %s)", settings.summary_base_url, resp.status_code)
+            logger.info("Summary endpoint reachable at %s (status %s)",
+                        settings.summary_base_url, resp.status_code)
         except Exception as exc:
             logger.warning("Summary endpoint not reachable at %s: %s", settings.summary_base_url, exc)
     else:
@@ -172,7 +175,7 @@ DB = Annotated[aiosqlite.Connection, Depends(get_db)]
 # ---------------------------------------------------------------------------
 
 async def _index_note(note_id: str, title: str, content: str,
-                      tags: list[str], folder: str) -> None:
+                      tags: list[str], folder: str, user_id: str = "") -> None:
     if not content.strip():
         logger.debug("Skipping index for note %s — empty content", note_id)
         return
@@ -193,6 +196,7 @@ async def _index_note(note_id: str, title: str, content: str,
             metas = [
                 {
                     "note_id": note_id,
+                    "user_id": user_id,
                     "chunk_index": c["chunk_index"],
                     "title": title,
                     "tags": json.dumps(tags),
@@ -216,7 +220,8 @@ async def _index_note(note_id: str, title: str, content: str,
 
 
 async def _index_attachment(att_id: str, note_id: str, text: str,
-                             source_label: str, source_url: str | None = None) -> None:
+                             source_label: str, source_url: str | None = None,
+                             user_id: str = "") -> None:
     logger.info("Indexing attachment %s for note %s (%d chars)", att_id, note_id, len(text))
     try:
         chunks = chunk_text(text)
@@ -234,6 +239,7 @@ async def _index_attachment(att_id: str, note_id: str, text: str,
             metas = [
                 {
                     "note_id": note_id,
+                    "user_id": user_id,
                     "attachment_id": att_id,
                     "chunk_index": c["chunk_index"],
                     "source_type": "attachment",
@@ -254,7 +260,7 @@ async def _index_attachment(att_id: str, note_id: str, text: str,
 
 
 async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
-                         original_filename: str) -> None:
+                         original_filename: str, user_id: str = "") -> None:
     try:
         result = await pdf_extract(stored_path)
         summary = await _llm_summary(result.text)
@@ -269,7 +275,7 @@ async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
                 summary=summary,
             )
             await db.set_note_type(conn, note_id, 'attachment')
-        await _index_attachment(att_id, note_id, result.text, original_filename)
+        await _index_attachment(att_id, note_id, result.text, original_filename, user_id=user_id)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
@@ -288,7 +294,7 @@ async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
             await db.update_attachment(conn, att_id, extraction_error=str(exc))
 
 
-async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
+async def _web_pipeline(att_id: str, note_id: str, url: str, user_id: str = "") -> None:
     try:
         result = await extract_url(url)
         label = result.title or _hostname(url)
@@ -306,7 +312,7 @@ async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
             )
             note_type = 'video' if get_youtube_video_id(url) else 'url'
             await db.set_note_type(conn, note_id, note_type)
-        await _index_attachment(att_id, note_id, result.text, label, source_url=url)
+        await _index_attachment(att_id, note_id, result.text, label, source_url=url, user_id=user_id)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
@@ -325,6 +331,43 @@ async def _web_pipeline(att_id: str, note_id: str, url: str) -> None:
             await db.update_attachment(conn, att_id, extraction_error=str(exc))
 
 
+async def _journal_pipeline(note_id: str, user_id: str = "") -> None:
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            note = await db.get_note(conn, note_id)
+            if not note or not note.content.strip():
+                return
+            rewritten = await _llm_journal_rewrite(note.content)
+            title = note.title
+            if not title or title.lower() in ("untitled", "shared note"):
+                title = f"Journal — {datetime.now(timezone.utc).strftime('%B %-d, %Y')}"
+            await db.update_note(conn, note_id, **{"title": title, "content": rewritten})
+        await vector_store.delete_by_note_id(note_id)
+        await _index_note(note_id, title, rewritten, note.tags, "Journal", user_id=user_id)
+        logger.info("Journal rewrite complete for note %s", note_id)
+    except Exception:
+        logger.warning("Journal pipeline failed for note %s", note_id, exc_info=True)
+
+
+async def _backfill_summaries(rows: list[tuple[str, str]]) -> None:
+    logger.info("Starting LLM summary backfill for %d attachment(s)...", len(rows))
+    completed = 0
+    for att_id, extracted_text in rows:
+        try:
+            summary = await _llm_summary(extracted_text)
+            async with aiosqlite.connect(settings.database_url) as conn:
+                conn.row_factory = aiosqlite.Row
+                await conn.execute("PRAGMA foreign_keys = ON")
+                await conn.execute("UPDATE attachments SET summary = ? WHERE id = ?", (summary, att_id))
+                await conn.commit()
+            completed += 1
+        except Exception:
+            logger.warning("Summary backfill failed for attachment %s", att_id, exc_info=True)
+    logger.info("Summary backfill complete: %d/%d succeeded", completed, len(rows))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -334,7 +377,6 @@ def _now() -> str:
 
 
 def _truncate_summary(text: str, max_chars: int = 200) -> str:
-    """Fallback: extract a short summary by truncating to a sentence boundary."""
     text = text.strip()
     if len(text) <= max_chars:
         return text
@@ -360,7 +402,6 @@ def _get_summary_client() -> httpx.AsyncClient:
 
 
 async def _llm_summary(text: str) -> str:
-    """Generate a ~150-word summary via LLM, falling back to truncation if unavailable."""
     if not settings.summary_base_url:
         logger.info("No SUMMARY_BASE_URL configured — using truncation fallback")
         return _truncate_summary(text)
@@ -372,26 +413,19 @@ async def _llm_summary(text: str) -> str:
     payload = {
         "model": settings.summary_model,
         "messages": [
-            {
-                "role": "system",
-                "content": "Summarize the following content in 50 words or fewer. Be concise and factual.",
-            },
+            {"role": "system",
+             "content": "Summarize the following content in 50 words or fewer. Be concise and factual."},
             {"role": "user", "content": text[:8000]},
         ],
         "max_tokens": 80,
     }
     try:
         client = _get_summary_client()
-        resp = await client.post(
-            f"{settings.summary_base_url}/v1/chat/completions",
-            json=payload,
-            headers=headers,
-        )
+        resp = await client.post(f"{settings.summary_base_url}/v1/chat/completions",
+                                 json=payload, headers=headers)
         if resp.status_code != 200:
-            logger.warning(
-                "Summary LLM returned %s — falling back to truncation: %s",
-                resp.status_code, resp.text[:200],
-            )
+            logger.warning("Summary LLM returned %s — falling back to truncation: %s",
+                           resp.status_code, resp.text[:200])
             return _truncate_summary(text)
         result = resp.json()["choices"][0]["message"]["content"].strip()
         logger.info("LLM summary generated (%d chars)", len(result))
@@ -430,56 +464,14 @@ async def _llm_journal_rewrite(text: str) -> str:
     }
     try:
         client = _get_summary_client()
-        resp = await client.post(
-            f"{settings.summary_base_url}/v1/chat/completions",
-            json=payload,
-            headers=headers,
-        )
+        resp = await client.post(f"{settings.summary_base_url}/v1/chat/completions",
+                                 json=payload, headers=headers)
         if resp.status_code != 200:
             return text
         return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception:
         logger.warning("Journal rewrite LLM call failed — returning original", exc_info=True)
         return text
-
-
-async def _journal_pipeline(note_id: str) -> None:
-    """Rewrite note content as a clean journal entry when saved to the Journal folder."""
-    try:
-        async with aiosqlite.connect(settings.database_url) as conn:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("PRAGMA foreign_keys = ON")
-            note = await db.get_note(conn, note_id)
-            if not note or not note.content.strip():
-                return
-            rewritten = await _llm_journal_rewrite(note.content)
-            title = note.title
-            if not title or title.lower() in ("untitled", "shared note"):
-                title = f"Journal — {datetime.now(timezone.utc).strftime('%B %-d, %Y')}"
-            await db.update_note(conn, note_id, title=title, content=rewritten)
-        await vector_store.delete_by_note_id(note_id)
-        await _index_note(note_id, title, rewritten, note.tags, "Journal")
-        logger.info("Journal rewrite complete for note %s", note_id)
-    except Exception:
-        logger.warning("Journal pipeline failed for note %s", note_id, exc_info=True)
-
-
-async def _backfill_summaries(rows: list[tuple[str, str]]) -> None:
-    """Generate LLM summaries for attachments that have extracted text but no summary."""
-    logger.info("Starting LLM summary backfill for %d attachment(s)...", len(rows))
-    completed = 0
-    for att_id, extracted_text in rows:
-        try:
-            summary = await _llm_summary(extracted_text)
-            async with aiosqlite.connect(settings.database_url) as conn:
-                conn.row_factory = aiosqlite.Row
-                await conn.execute("PRAGMA foreign_keys = ON")
-                await conn.execute("UPDATE attachments SET summary = ? WHERE id = ?", (summary, att_id))
-                await conn.commit()
-            completed += 1
-        except Exception:
-            logger.warning("Summary backfill failed for attachment %s", att_id, exc_info=True)
-    logger.info("Summary backfill complete: %d/%d succeeded", completed, len(rows))
 
 
 def _hostname(url: str) -> str:
@@ -495,70 +487,102 @@ def _purge_expired_shares() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+async def login(body: LoginRequest, conn: DB):
+    user = await db.get_user_by_username(conn, body.username)
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = create_token(user["id"])
+    return TokenResponse(token=token, username=user["username"])
+
+
+@app.get("/api/auth/me", response_model=UserResponse)
+async def me(current_user: CurrentUser):
+    return UserResponse(**current_user)
+
+
+@app.post("/api/auth/change-password", status_code=204)
+async def change_password(body: ChangePasswordRequest, current_user: CurrentUser, conn: DB):
+    user = await db.get_user_by_username(conn, current_user["username"])
+    if not user or not verify_password(body.current_password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    new_hash = hash_password(body.new_password)
+    await conn.execute(
+        "UPDATE users SET password_hash = ? WHERE id = ?",
+        (new_hash, current_user["id"]),
+    )
+    await conn.commit()
+
+
+# ---------------------------------------------------------------------------
 # Notes CRUD
 # ---------------------------------------------------------------------------
 
 @app.get("/api/notes", response_model=list[NoteResponse])
 async def list_notes(
     conn: DB,
+    current_user: CurrentUser,
     tag: str | None = Query(default=None),
     folder: str | None = Query(default=None),
 ):
-    return await db.list_notes(conn, tag=tag, folder=folder)
+    return await db.list_notes(conn, user_id=current_user["id"], tag=tag, folder=folder)
 
 
 @app.get("/api/notes/{note_id}", response_model=NoteResponse)
-async def get_note(note_id: str, conn: DB):
-    note = await db.get_note(conn, note_id)
+async def get_note(note_id: str, conn: DB, current_user: CurrentUser):
+    note = await db.get_note(conn, note_id, user_id=current_user["id"])
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     return note
 
 
 @app.post("/api/notes", response_model=NoteResponse, status_code=201)
-async def create_note(body: NoteCreate, conn: DB, background_tasks: BackgroundTasks):
-    note = await db.create_note(conn, body.title, body.content, body.tags, body.folder,
-                                reminder_at=body.reminder_at)
+async def create_note(body: NoteCreate, conn: DB, background_tasks: BackgroundTasks,
+                      current_user: CurrentUser):
+    note = await db.create_note(conn, current_user["id"], body.title, body.content,
+                                body.tags, body.folder, reminder_at=body.reminder_at)
     if note.folder == "Journal":
-        background_tasks.add_task(_journal_pipeline, note.id)
+        background_tasks.add_task(_journal_pipeline, note.id, current_user["id"])
     else:
         background_tasks.add_task(
-            _index_note, note.id, note.title, note.content, note.tags, note.folder
+            _index_note, note.id, note.title, note.content, note.tags, note.folder,
+            current_user["id"]
         )
     return note
 
 
 @app.put("/api/notes/{note_id}", response_model=NoteResponse)
 async def update_note(note_id: str, body: NoteUpdate, conn: DB,
-                      background_tasks: BackgroundTasks):
-    existing = await db.get_note(conn, note_id)
+                      background_tasks: BackgroundTasks, current_user: CurrentUser):
+    existing = await db.get_note(conn, note_id, user_id=current_user["id"])
     if not existing:
         raise HTTPException(status_code=404, detail="Note not found")
     raw = body.model_dump(exclude_unset=True)
-    # Allow reminder_at=None to clear it, but drop other None values (means "don't change")
     fields = {k: v for k, v in raw.items() if v is not None or k == "reminder_at"}
-    note = await db.update_note(conn, note_id, **fields)
-    # Clear indexed_at and re-index
+    note = await db.update_note(conn, note_id, user_id=current_user["id"], **fields)
     await db.clear_note_indexed(conn, note_id)
     try:
         await vector_store.delete_by_note_id(note_id)
     except Exception as exc:
         logger.warning("Could not delete old vectors for note %s: %s", note_id, exc)
     if note.folder == "Journal":
-        background_tasks.add_task(_journal_pipeline, note.id)
+        background_tasks.add_task(_journal_pipeline, note.id, current_user["id"])
     else:
         background_tasks.add_task(
-            _index_note, note.id, note.title, note.content, note.tags, note.folder
+            _index_note, note.id, note.title, note.content, note.tags, note.folder,
+            current_user["id"]
         )
     return note
 
 
 @app.delete("/api/notes/{note_id}", status_code=204)
-async def delete_note(note_id: str, conn: DB):
-    note = await db.get_note(conn, note_id)
+async def delete_note(note_id: str, conn: DB, current_user: CurrentUser):
+    note = await db.get_note(conn, note_id, user_id=current_user["id"])
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
-    # Delete attachment files
     atts = await db.list_attachments(conn, note_id)
     for att in atts:
         if att.stored_path:
@@ -569,7 +593,6 @@ async def delete_note(note_id: str, conn: DB):
             await vector_store.delete_by_attachment_id(att.id)
         except Exception:
             logger.warning("Could not delete vectors for attachment %s", att.id, exc_info=True)
-    # Clean up note dir
     note_dir = ATTACHMENT_DIR / note_id
     if note_dir.exists():
         shutil.rmtree(note_dir, ignore_errors=True)
@@ -577,7 +600,7 @@ async def delete_note(note_id: str, conn: DB):
         await vector_store.delete_by_note_id(note_id)
     except Exception as exc:
         logger.warning("Could not delete vectors for note %s: %s", note_id, exc)
-    await db.delete_note(conn, note_id)
+    await db.delete_note(conn, note_id, user_id=current_user["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -585,13 +608,13 @@ async def delete_note(note_id: str, conn: DB):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/tags")
-async def list_tags(conn: DB):
-    return await db.list_tags(conn)
+async def list_tags(conn: DB, current_user: CurrentUser):
+    return await db.list_tags(conn, user_id=current_user["id"])
 
 
 @app.get("/api/tasks", response_model=list[NoteResponse])
-async def list_tasks(conn: DB):
-    return await db.list_next_tasks(conn)
+async def list_tasks(conn: DB, current_user: CurrentUser):
+    return await db.list_next_tasks(conn, user_id=current_user["id"])
 
 
 @app.get("/api/version")
@@ -600,7 +623,7 @@ async def get_version():
 
 
 @app.get("/api/folders")
-async def list_folders(conn: DB):
+async def list_folders(conn: DB, current_user: CurrentUser):
     return await db.list_folders(conn)
 
 
@@ -609,6 +632,7 @@ async def dictate_journal(
     audio: UploadFile,
     conn: DB,
     background_tasks: BackgroundTasks,
+    current_user: CurrentUser,
 ):
     audio_bytes = await audio.read()
     logger.info("dictate: received %d bytes, content_type=%s", len(audio_bytes), audio.content_type)
@@ -627,15 +651,9 @@ async def dictate_journal(
     if not transcript:
         raise HTTPException(status_code=422, detail="Transcription returned empty text")
 
-    note_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    await conn.execute(
-        "INSERT INTO notes (id, title, content, tags, folder, created_at, updated_at, note_type) VALUES (?,?,?,?,?,?,?,?)",
-        (note_id, "Untitled", transcript, json.dumps([]), "Journal", now, now, "markdown"),
-    )
-    await conn.commit()
-    await _journal_pipeline(note_id)
-    return {"id": note_id}
+    note = await db.create_note(conn, current_user["id"], "Untitled", transcript, [], "Journal")
+    await _journal_pipeline(note.id, current_user["id"])
+    return {"id": note.id}
 
 
 # ---------------------------------------------------------------------------
@@ -643,27 +661,21 @@ async def dictate_journal(
 # ---------------------------------------------------------------------------
 
 @app.post("/api/search", response_model=list[SearchResult])
-async def search(body: SearchRequest, conn: DB):
+async def search(body: SearchRequest, conn: DB, current_user: CurrentUser):
     try:
         emb = await embeddings.embed_texts([body.query])
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Embedding service unavailable: {exc}")
 
-    where: dict | None = None
-    conditions = []
+    conditions = [{"user_id": {"$eq": current_user["id"]}}]
     if body.tags:
-        # Chroma $in operator for any matching tag (stored as JSON string)
-        # We search per-tag and merge, or use a simpler approach
         conditions.append({"$or": [{"tags": {"$contains": t}} for t in body.tags]})
     if body.folder:
         conditions.append({"folder": {"$eq": body.folder}})
     else:
         conditions.append({"folder": {"$ne": "Archive"}})
 
-    if len(conditions) == 1:
-        where = conditions[0]
-    elif len(conditions) > 1:
-        where = {"$and": conditions}
+    where = {"$and": conditions} if len(conditions) > 1 else conditions[0]
 
     try:
         raw = await vector_store.query(emb[0], body.n_results, where)
@@ -674,10 +686,9 @@ async def search(body: SearchRequest, conn: DB):
     for item in raw:
         meta = item["metadata"]
         note_id = meta.get("note_id", "")
-        note = await db.get_note(conn, note_id)
+        note = await db.get_note(conn, note_id, user_id=current_user["id"])
         if not note:
             continue
-        # cosine distance → similarity score
         score = 1.0 - item["distance"]
         att_id = meta.get("attachment_id") or None
         att_summary: str | None = None
@@ -707,21 +718,22 @@ async def search(body: SearchRequest, conn: DB):
 # Attachments
 # ---------------------------------------------------------------------------
 
-@app.post("/api/notes/{note_id}/attachments", response_model=AttachmentResponse,
-          status_code=202)
+@app.post("/api/notes/{note_id}/attachments", response_model=AttachmentResponse, status_code=202)
 async def upload_attachment(
     note_id: str,
     conn: DB,
     background_tasks: BackgroundTasks,
+    current_user: CurrentUser,
     file: UploadFile = File(...),
 ):
-    note = await db.get_note(conn, note_id)
+    note = await db.get_note(conn, note_id, user_id=current_user["id"])
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
 
     existing = await db.list_attachments(conn, note_id)
     if existing:
-        raise HTTPException(status_code=400, detail="This note already has an attachment. Create a new note for additional content.")
+        raise HTTPException(status_code=400,
+                            detail="This note already has an attachment. Create a new note for additional content.")
 
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=415, detail="Only PDF files are accepted")
@@ -743,31 +755,32 @@ async def upload_attachment(
 
     original_filename = file.filename or "attachment.pdf"
     att = await db.create_attachment(
-        conn,
-        note_id=note_id,
-        filename=original_filename,
-        mime_type="application/pdf",
-        size_bytes=len(contents),
+        conn, note_id=note_id, filename=original_filename,
+        mime_type="application/pdf", size_bytes=len(contents),
         stored_path=str(stored_path),
     )
     background_tasks.add_task(
-        _pdf_pipeline, att.id, note_id, str(full_path), original_filename
+        _pdf_pipeline, att.id, note_id, str(full_path), original_filename, current_user["id"]
     )
     return att
 
 
 @app.get("/api/notes/{note_id}/attachments", response_model=list[AttachmentResponse])
-async def list_attachments(note_id: str, conn: DB):
-    note = await db.get_note(conn, note_id)
+async def list_attachments(note_id: str, conn: DB, current_user: CurrentUser):
+    note = await db.get_note(conn, note_id, user_id=current_user["id"])
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     return await db.list_attachments(conn, note_id)
 
 
 @app.get("/api/attachments/{att_id}/download")
-async def download_attachment(att_id: str, conn: DB):
+async def download_attachment(att_id: str, conn: DB, current_user: CurrentUser):
     att = await db.get_attachment(conn, att_id)
     if not att or not att.stored_path:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    # Verify ownership via the note
+    note = await db.get_note(conn, att.note_id, user_id=current_user["id"])
+    if not note:
         raise HTTPException(status_code=404, detail="Attachment not found")
     full_path = ATTACHMENT_DIR / att.stored_path
     if not full_path.exists():
@@ -780,9 +793,12 @@ async def download_attachment(att_id: str, conn: DB):
 
 
 @app.delete("/api/attachments/{att_id}", status_code=204)
-async def delete_attachment(att_id: str, conn: DB):
+async def delete_attachment(att_id: str, conn: DB, current_user: CurrentUser):
     att = await db.get_attachment(conn, att_id)
     if not att:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    note = await db.get_note(conn, att.note_id, user_id=current_user["id"])
+    if not note:
         raise HTTPException(status_code=404, detail="Attachment not found")
     if att.stored_path:
         full_path = ATTACHMENT_DIR / att.stored_path
@@ -799,8 +815,9 @@ async def delete_attachment(att_id: str, conn: DB):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/notes/{note_id}/reindex", response_model=NoteResponse)
-async def reindex_note(note_id: str, conn: DB, background_tasks: BackgroundTasks):
-    note = await db.get_note(conn, note_id)
+async def reindex_note(note_id: str, conn: DB, background_tasks: BackgroundTasks,
+                       current_user: CurrentUser):
+    note = await db.get_note(conn, note_id, user_id=current_user["id"])
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     await db.clear_note_indexed(conn, note_id)
@@ -809,8 +826,6 @@ async def reindex_note(note_id: str, conn: DB, background_tasks: BackgroundTasks
     except Exception as exc:
         logger.warning("Could not delete old vectors: %s", exc)
 
-    # Derive and set note_type from existing attachments synchronously so the
-    # returned note has the correct type before the frontend poll re-fetches it.
     atts = await db.list_attachments(conn, note_id)
     if atts:
         if any(a.mime_type == "application/pdf" for a in atts):
@@ -822,45 +837,42 @@ async def reindex_note(note_id: str, conn: DB, background_tasks: BackgroundTasks
         for att in atts:
             if att.mime_type == "application/pdf" and att.stored_path:
                 background_tasks.add_task(
-                    _pdf_pipeline, att.id, note_id, str(ATTACHMENT_DIR / att.stored_path), att.filename
+                    _pdf_pipeline, att.id, note_id,
+                    str(ATTACHMENT_DIR / att.stored_path), att.filename, current_user["id"]
                 )
             elif att.mime_type in ("text/html", "video/youtube") and att.source_url:
-                background_tasks.add_task(_web_pipeline, att.id, note_id, att.source_url)
+                background_tasks.add_task(_web_pipeline, att.id, note_id, att.source_url,
+                                          current_user["id"])
 
-    await _index_note(note.id, note.title, note.content, note.tags, note.folder)
-    return await db.get_note(conn, note_id)
+    await _index_note(note.id, note.title, note.content, note.tags, note.folder,
+                      current_user["id"])
+    return await db.get_note(conn, note_id, user_id=current_user["id"])
 
 
 @app.post("/api/reindex", response_model=ReindexJob)
 async def bulk_reindex(
     conn: DB,
     background_tasks: BackgroundTasks,
+    current_user: CurrentUser,
     folder: str | None = None,
     tag: str | None = None,
 ):
-    notes = await db.list_notes(conn, tag=tag, folder=folder)
+    notes = await db.list_notes(conn, user_id=current_user["id"], tag=tag, folder=folder)
     job_id = str(uuid.uuid4())
     job = ReindexJob(
-        job_id=job_id,
-        status="running",
-        total=len(notes),
-        completed=0,
-        failed=0,
-        started_at=_now(),
+        job_id=job_id, status="running", total=len(notes),
+        completed=0, failed=0, started_at=_now(),
     )
     _reindex_jobs[job_id] = job
     global _latest_job_id
     _latest_job_id = job_id
 
-    note_snapshots = [
-        (n.id, n.title, n.content, n.tags, n.folder) for n in notes
-    ]
-
-    background_tasks.add_task(_bulk_reindex_task, job_id, note_snapshots)
+    note_snapshots = [(n.id, n.title, n.content, n.tags, n.folder) for n in notes]
+    background_tasks.add_task(_bulk_reindex_task, job_id, note_snapshots, current_user["id"])
     return job
 
 
-async def _bulk_reindex_task(job_id: str, notes: list[tuple]) -> None:
+async def _bulk_reindex_task(job_id: str, notes: list[tuple], user_id: str) -> None:
     job = _reindex_jobs[job_id]
     for note_id, title, content, tags, folder in notes:
         try:
@@ -872,10 +884,8 @@ async def _bulk_reindex_task(job_id: str, notes: list[tuple]) -> None:
                 await vector_store.delete_by_note_id(note_id)
             except Exception:
                 logger.warning("Could not delete old vectors for note %s", note_id, exc_info=True)
-            await _index_note(note_id, title, content, tags, folder)
+            await _index_note(note_id, title, content, tags, folder, user_id)
 
-            # Re-index attachments — derive note_type from all attachments first,
-            # then re-run pipelines for those that have already been extracted.
             async with aiosqlite.connect(settings.database_url) as conn:
                 conn.row_factory = aiosqlite.Row
                 await conn.execute("PRAGMA foreign_keys = ON")
@@ -893,9 +903,9 @@ async def _bulk_reindex_task(job_id: str, notes: list[tuple]) -> None:
                     await vector_store.delete_by_attachment_id(att.id)
                     if att.mime_type == "application/pdf" and att.stored_path:
                         full_path = str(ATTACHMENT_DIR / att.stored_path)
-                        await _pdf_pipeline(att.id, note_id, full_path, att.filename)
+                        await _pdf_pipeline(att.id, note_id, full_path, att.filename, user_id)
                     elif att.mime_type in ("text/html", "video/youtube") and att.source_url:
-                        await _web_pipeline(att.id, note_id, att.source_url)
+                        await _web_pipeline(att.id, note_id, att.source_url, user_id)
                     job.attachments_completed += 1
                 except Exception as exc:
                     logger.warning("Attachment reindex failed %s: %s", att.id, exc)
@@ -912,7 +922,7 @@ async def _bulk_reindex_task(job_id: str, notes: list[tuple]) -> None:
 
 
 @app.get("/api/reindex/status", response_model=ReindexJob)
-async def reindex_status(job_id: str | None = Query(default=None)):
+async def reindex_status(current_user: CurrentUser, job_id: str | None = Query(default=None)):
     if job_id:
         job = _reindex_jobs.get(job_id)
     elif _latest_job_id:
@@ -940,64 +950,63 @@ def _parse_times(s: str) -> list[str]:
     return [t.strip() for t in s.split(",") if t.strip()]
 
 
-async def _read_reminder_times(conn) -> list[str]:
-    """Return current reminder_times, migrating legacy reminder_hours if needed."""
-    raw = await db.get_setting(conn, "reminder_times")
+async def _read_reminder_times(conn, user_id: str) -> list[str]:
+    raw = await db.get_user_setting(conn, user_id, "reminder_times")
     if raw is not None:
         return _parse_times(raw)
     # Migrate legacy hour-only setting
-    legacy = await db.get_setting(conn, "reminder_hours")
+    legacy = await db.get_user_setting(conn, user_id, "reminder_hours")
     if legacy:
         migrated = ",".join(f"{int(h.strip()):02d}:00" for h in legacy.split(",") if h.strip())
-        await db.set_setting(conn, "reminder_times", migrated)
+        await db.set_user_setting(conn, user_id, "reminder_times", migrated)
         return _parse_times(migrated)
     return _parse_times(_DEFAULT_REMINDER_TIMES)
 
 
-def _tg_env(env_key: str, default: str = "") -> str:
-    return os.environ.get(env_key, default)
+async def _build_settings_response(conn, user_id: str) -> SettingsResponse:
+    async def _get_u(key: str, default: str = "") -> str:
+        val = await db.get_user_setting(conn, user_id, key)
+        return val if val is not None else default
 
-
-async def _build_settings_response(conn) -> SettingsResponse:
-    async def _get(key: str, env_key: str = "", default: str = "") -> str:
+    async def _get_g(key: str, env_key: str = "", default: str = "") -> str:
         val = await db.get_setting(conn, key)
         if val is not None:
             return val
         return os.environ.get(env_key, default) if env_key else default
 
-    times = await _read_reminder_times(conn)
+    times = await _read_reminder_times(conn, user_id)
 
-    allowed_raw = await _get("telegram_allowed_users", "TELEGRAM_ALLOWED_USERS", "")
+    allowed_raw = await _get_g("telegram_allowed_users", "TELEGRAM_ALLOWED_USERS", "")
     allowed = [int(u.strip()) for u in allowed_raw.split(",") if u.strip()]
 
-    chat_id_raw = await _get("telegram_reminder_chat_id", "TELEGRAM_REMINDER_CHAT_ID", "0")
+    chat_id_raw = await _get_g("telegram_reminder_chat_id", "TELEGRAM_REMINDER_CHAT_ID", "0")
     chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
 
-    max_hist_raw = await _get("telegram_max_history", "TELEGRAM_MAX_HISTORY", "20")
+    max_hist_raw = await _get_g("telegram_max_history", "TELEGRAM_MAX_HISTORY", "20")
     max_hist = int(max_hist_raw) if max_hist_raw.strip() else 20
 
-    journal_raw = await db.get_setting(conn, "journal_reminder_times")
+    journal_raw = await db.get_user_setting(conn, user_id, "journal_reminder_times")
     journal_times = _parse_times(journal_raw) if journal_raw else []
 
-    tz = await db.get_setting(conn, "server_timezone") or os.environ.get("TZ", "")
+    tz = await _get_u("server_timezone") or os.environ.get("TZ", "")
 
     return SettingsResponse(
         server_timezone=tz,
         reminder_times=times,
         journal_reminder_times=journal_times,
-        telegram_bot_token=await _get("telegram_bot_token", "TELEGRAM_BOT_TOKEN", ""),
+        telegram_bot_token=await _get_g("telegram_bot_token", "TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_users=allowed,
         telegram_reminder_chat_id=chat_id,
-        telegram_rag_url=await _get("telegram_rag_url", "TELEGRAM_RAG_URL", "http://localhost:8084"),
-        telegram_rag_model=await _get("telegram_rag_model", "TELEGRAM_RAG_MODEL", "noterai-rag"),
+        telegram_rag_url=await _get_g("telegram_rag_url", "TELEGRAM_RAG_URL", "http://localhost:8084"),
+        telegram_rag_model=await _get_g("telegram_rag_model", "TELEGRAM_RAG_MODEL", "noterai-rag"),
         telegram_max_history=max_hist,
-        character_prompt=await _get("character_prompt", default=""),
+        character_prompt=await _get_u("character_prompt"),
     )
 
 
 @app.get("/api/settings", response_model=SettingsResponse)
-async def get_settings(conn: DB):
-    return await _build_settings_response(conn)
+async def get_settings(conn: DB, current_user: CurrentUser):
+    return await _build_settings_response(conn, current_user["id"])
 
 
 def _validate_times(times: list[str], label: str) -> None:
@@ -1011,34 +1020,40 @@ def _validate_times(times: list[str], label: str) -> None:
 
 
 @app.patch("/api/settings", response_model=SettingsResponse)
-async def update_settings(body: SettingsPatch, conn: DB):
+async def update_settings(body: SettingsPatch, conn: DB, current_user: CurrentUser):
+    uid = current_user["id"]
+    # Per-user settings
     if body.server_timezone is not None:
-        await db.set_setting(conn, "server_timezone", body.server_timezone)
+        await db.set_user_setting(conn, uid, "server_timezone", body.server_timezone)
     if body.reminder_times is not None:
         _validate_times(body.reminder_times, "Reminder times")
-        await db.set_setting(conn, "reminder_times", ",".join(body.reminder_times))
+        await db.set_user_setting(conn, uid, "reminder_times", ",".join(body.reminder_times))
     if body.journal_reminder_times is not None:
         _validate_times(body.journal_reminder_times, "Journal reminder times")
-        await db.set_setting(conn, "journal_reminder_times", ",".join(body.journal_reminder_times))
+        await db.set_user_setting(conn, uid, "journal_reminder_times",
+                                  ",".join(body.journal_reminder_times))
+    if body.character_prompt is not None:
+        await db.set_user_setting(conn, uid, "character_prompt", body.character_prompt)
+    # Global settings (Telegram)
     if body.telegram_bot_token is not None:
         await db.set_setting(conn, "telegram_bot_token", body.telegram_bot_token)
     if body.telegram_allowed_users is not None:
-        await db.set_setting(conn, "telegram_allowed_users", ",".join(str(u) for u in body.telegram_allowed_users))
+        await db.set_setting(conn, "telegram_allowed_users",
+                             ",".join(str(u) for u in body.telegram_allowed_users))
     if body.telegram_reminder_chat_id is not None:
-        await db.set_setting(conn, "telegram_reminder_chat_id", str(body.telegram_reminder_chat_id))
+        await db.set_setting(conn, "telegram_reminder_chat_id",
+                             str(body.telegram_reminder_chat_id))
     if body.telegram_rag_url is not None:
         await db.set_setting(conn, "telegram_rag_url", body.telegram_rag_url)
     if body.telegram_rag_model is not None:
         await db.set_setting(conn, "telegram_rag_model", body.telegram_rag_model)
     if body.telegram_max_history is not None:
         await db.set_setting(conn, "telegram_max_history", str(body.telegram_max_history))
-    if body.character_prompt is not None:
-        await db.set_setting(conn, "character_prompt", body.character_prompt)
-    return await _build_settings_response(conn)
+    return await _build_settings_response(conn, uid)
 
 
 @app.post("/api/settings/test-telegram")
-async def test_telegram(conn: DB):
+async def test_telegram(conn: DB, current_user: CurrentUser):
     token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
     chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
@@ -1062,7 +1077,7 @@ async def test_telegram(conn: DB):
 
 
 @app.post("/api/settings/test-task-reminder")
-async def test_task_reminder(conn: DB):
+async def test_task_reminder(conn: DB, current_user: CurrentUser):
     token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
     chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
@@ -1072,12 +1087,12 @@ async def test_task_reminder(conn: DB):
     if not chat_id:
         raise HTTPException(status_code=400, detail="Reminder chat ID is not configured")
 
-    char_prompt = await db.get_setting(conn, "character_prompt") or _DEFAULT_CHARACTER_PROMPT
+    char_prompt = await db.get_user_setting(conn, current_user["id"], "character_prompt") or _DEFAULT_CHARACTER_PROMPT
     today = date.today().isoformat()
     async with conn.execute(
-        "SELECT title, reminder_at FROM notes "
-        "WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
-        (today,),
+        "SELECT title, reminder_at FROM notes"
+        " WHERE user_id = ? AND reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+        (current_user["id"], today),
     ) as cur:
         rows = await cur.fetchall()
 
@@ -1089,15 +1104,10 @@ async def test_task_reminder(conn: DB):
             text = "Due tasks:\n" + "\n".join(task_lines)
     elif not rows:
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    f"{char_prompt} "
-                    "The user has no overdue or due tasks today — they are all caught up. "
-                    "Send a brief, genuine well-done (1-2 sentences). "
-                    "Warm but understated. No bullet points, no markdown, no headers."
-                ),
-            },
+            {"role": "system", "content": (
+                f"{char_prompt} The user has no overdue or due tasks today — they are all caught up. "
+                "Send a brief, genuine well-done (1-2 sentences). Warm but understated. No bullet points."
+            )},
             {"role": "user", "content": "I have no tasks due today."},
         ]
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1109,21 +1119,14 @@ async def test_task_reminder(conn: DB):
                 raise HTTPException(status_code=502, detail=f"LLM API error: {llm_resp.text}")
             text = llm_resp.json()["choices"][0]["message"]["content"]
     else:
-        task_lines = []
-        for r in rows:
-            label = "Overdue" if r["reminder_at"] < today else "Due today"
-            task_lines.append(f"- {label} ({r['reminder_at']}): {r['title']}")
+        task_lines = [f"- {'Overdue' if r['reminder_at'] < today else 'Due today'} ({r['reminder_at']}): {r['title']}" for r in rows]
         task_list = "Here are my due and overdue tasks:\n" + "\n".join(task_lines)
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    f"{char_prompt} "
-                    "You are sending a proactive scheduled reminder via Telegram. "
-                    "Summarize the provided due tasks — helpful, brief, and a touch wry. "
-                    "Be a little opinionated about what they should tackle first. No bullet points."
-                ),
-            },
+            {"role": "system", "content": (
+                f"{char_prompt} You are sending a proactive scheduled reminder via Telegram. "
+                "Summarize the provided due tasks — helpful, brief, and a touch wry. "
+                "Be a little opinionated about what they should tackle first. No bullet points."
+            )},
             {"role": "user", "content": task_list},
         ]
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1148,7 +1151,7 @@ async def test_task_reminder(conn: DB):
 
 
 @app.post("/api/settings/test-journal-reminder")
-async def test_journal_reminder(conn: DB):
+async def test_journal_reminder(conn: DB, current_user: CurrentUser):
     token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
     chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
@@ -1160,40 +1163,30 @@ async def test_journal_reminder(conn: DB):
     if not settings.summary_base_url:
         raise HTTPException(status_code=400, detail="SUMMARY_BASE_URL is not configured")
 
-    char_prompt = await db.get_setting(conn, "character_prompt") or _DEFAULT_CHARACTER_PROMPT
+    char_prompt = await db.get_user_setting(conn, current_user["id"], "character_prompt") or _DEFAULT_CHARACTER_PROMPT
     today = date.today().isoformat()
     async with conn.execute(
-        "SELECT COUNT(*) FROM notes WHERE folder = 'Journal' AND substr(created_at, 1, 10) = ?",
-        (today,),
+        "SELECT COUNT(*) FROM notes WHERE user_id = ? AND folder = 'Journal' AND substr(created_at, 1, 10) = ?",
+        (current_user["id"], today),
     ) as cur:
         row = await cur.fetchone()
     has_entry = (row[0] if row else 0) > 0
 
     if has_entry:
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    f"{char_prompt} "
-                    "The user has already written their journal entry today. "
-                    "Send a brief, genuine well-done (1-2 sentences). "
-                    "Warm but understated. No bullet points, no markdown, no headers."
-                ),
-            },
+            {"role": "system", "content": (
+                f"{char_prompt} The user has already written their journal entry today. "
+                "Send a brief, genuine well-done (1-2 sentences). Warm but understated. No bullet points."
+            )},
             {"role": "user", "content": "I've written my journal entry for today."},
         ]
     else:
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    f"{char_prompt} "
-                    "The user has not written a journal entry today. "
-                    "Write a short nudge (2-3 sentences, under 100 words) encouraging them to "
-                    "take a few minutes and reflect on their day. "
-                    "Helpful, brief, and a touch wry. No bullet points, no markdown, no headers."
-                ),
-            },
+            {"role": "system", "content": (
+                f"{char_prompt} The user has not written a journal entry today. "
+                "Write a short nudge (2-3 sentences, under 100 words) encouraging them to "
+                "take a few minutes and reflect on their day. Helpful, brief, and a touch wry. No bullet points."
+            )},
             {"role": "user", "content": "Remind me to write my journal entry for today."},
         ]
 
@@ -1219,8 +1212,19 @@ async def test_journal_reminder(conn: DB):
 
 
 # ---------------------------------------------------------------------------
-# Share target
+# Share target (unauthenticated — identified by per-user share_key)
 # ---------------------------------------------------------------------------
+
+async def _get_share_user_id(conn: aiosqlite.Connection,
+                              share_key: str | None) -> str | None:
+    if share_key:
+        user = await db.get_user_by_share_key(conn, share_key)
+        if user:
+            return user["id"]
+    # Fall back to first user
+    user = await db.get_first_user(conn)
+    return user["id"] if user else None
+
 
 @app.post("/api/share")
 async def share(
@@ -1229,6 +1233,7 @@ async def share(
     text: str = Form(default=""),
     url: str = Form(default=""),
     file: UploadFile | None = File(default=None),
+    key: str | None = Query(default=None),
 ):
     token = str(uuid.uuid4())[:8]
     expires = datetime.now(timezone.utc) + timedelta(minutes=5)
@@ -1237,10 +1242,13 @@ async def share(
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA foreign_keys = ON")
 
+        user_id = await _get_share_user_id(conn, key)
+        if not user_id:
+            return RedirectResponse(url="/share-handler?error=no_user", status_code=302)
+
         if file and file.filename:
-            # Case 1: PDF file
             stem = Path(file.filename).stem.replace("_", " ").replace("-", " ")
-            note = await db.create_note(conn, stem, "", [], "shared", note_type='attachment')
+            note = await db.create_note(conn, user_id, stem, "", [], "shared", note_type='attachment')
             contents = await file.read()
             att_id = str(uuid.uuid4())
             note_dir = ATTACHMENT_DIR / note.id
@@ -1251,49 +1259,38 @@ async def share(
             async with aiofiles.open(full_path, "wb") as f:
                 await f.write(contents)
             att = await db.create_attachment(
-                conn,
-                note_id=note.id,
-                filename=file.filename,
-                mime_type="application/pdf",
-                size_bytes=len(contents),
+                conn, note_id=note.id, filename=file.filename,
+                mime_type="application/pdf", size_bytes=len(contents),
                 stored_path=str(stored_path),
             )
             background_tasks.add_task(
-                _pdf_pipeline, att.id, note.id, str(full_path), file.filename
+                _pdf_pipeline, att.id, note.id, str(full_path), file.filename, user_id
             )
         elif url or text.strip().startswith(('http://', 'https://')):
-            # Case 2: URL share — either url field or text field contains a URL
-            # (some Android apps route the URL through the text field)
             resolved_url = url or text.strip()
             hostname = _hostname(resolved_url)
             note_title = title.strip() or hostname
             is_youtube = get_youtube_video_id(resolved_url) is not None
             note_type = 'video' if is_youtube else 'url'
             mime_type = 'video/youtube' if is_youtube else 'text/html'
-            note = await db.create_note(conn, note_title, resolved_url, [], "shared", note_type=note_type)
+            note = await db.create_note(conn, user_id, note_title, resolved_url, [], "shared",
+                                        note_type=note_type)
             att = await db.create_attachment(
-                conn,
-                note_id=note.id,
-                filename=hostname,
-                mime_type=mime_type,
-                size_bytes=0,
-                source_url=resolved_url,
+                conn, note_id=note.id, filename=hostname,
+                mime_type=mime_type, size_bytes=0, source_url=resolved_url,
             )
-            background_tasks.add_task(_web_pipeline, att.id, note.id, resolved_url)
+            background_tasks.add_task(_web_pipeline, att.id, note.id, resolved_url, user_id)
         else:
-            # Case 3: text only
             note_title = title[:80].strip() or "Shared note"
-            note = await db.create_note(conn, note_title, text, [], "shared")
+            note = await db.create_note(conn, user_id, note_title, text, [], "shared")
             background_tasks.add_task(
-                _index_note, note.id, note.title, note.content, note.tags, note.folder
+                _index_note, note.id, note.title, note.content, note.tags, note.folder, user_id
             )
 
     _purge_expired_shares()
     _pending_share[token] = {"note_id": note.id, "expires_at": expires}
 
-    return RedirectResponse(
-        url=f"/share-handler?token={token}", status_code=302
-    )
+    return RedirectResponse(url=f"/share-handler?token={token}", status_code=302)
 
 
 @app.get("/api/share/pending")
@@ -1319,38 +1316,30 @@ async def share_handler():
 @app.get("/health")
 async def health():
     result: dict = {}
-
-    # SQLite
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             await conn.execute("SELECT 1")
         result["sqlite"] = "ok"
     except Exception as exc:
         result["sqlite"] = f"error: {exc}"
-
-    # ChromaDB
     try:
         await vector_store.get_collection()
         result["chroma"] = "ok"
     except Exception as exc:
         result["chroma"] = f"error: {exc}"
-
-    # Embedding
     try:
         await embeddings.embed_texts(["ping"])
         result["embedding"] = "ok"
     except Exception as exc:
         result["embedding"] = f"error: {exc}"
-
     overall = "ok" if all(v == "ok" for v in result.values()) else "degraded"
     result["status"] = overall
     return result
 
 
 # ---------------------------------------------------------------------------
-# service_worker.js — served dynamically so APP_VERSION is injected at startup
-# manifest.json — served dynamically so APP_BASE_URL is always current
-# (both must be defined before the StaticFiles mount)
+# Dynamic routes — service_worker.js and manifest.json
+# (must be defined before the StaticFiles mount)
 # ---------------------------------------------------------------------------
 
 @app.get("/service_worker.js", include_in_schema=False)
@@ -1361,34 +1350,46 @@ async def service_worker():
         headers={"Cache-Control": "no-cache"},
     )
 
+
+def _build_user_manifest(share_key: str) -> dict:
+    share_url = f"{settings.app_base_url}/api/share?key={share_key}"
+    manifest_data = dict(_BASE_MANIFEST)
+    manifest_data["share_target"] = {
+        "action": share_url,
+        "method": "POST",
+        "enctype": "multipart/form-data",
+        "params": {
+            "title": "title",
+            "text": "text",
+            "url": "url",
+            "files": [{"name": "file", "accept": ["application/pdf"]}],
+        },
+    }
+    return manifest_data
+
+
 @app.get("/manifest.json", include_in_schema=False)
 async def manifest():
-    return JSONResponse(
-        content={
-            "name": "NoterAI",
-            "short_name": "NoterAI",
-            "start_url": "/",
-            "display": "standalone",
-            "background_color": "#ffffff",
-            "theme_color": "#4f46e5",
-            "icons": [
-                {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
-                {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
-            ],
-            "share_target": {
-                "action": f"{settings.app_base_url}/api/share",
-                "method": "POST",
-                "enctype": "multipart/form-data",
-                "params": {
-                    "title": "title",
-                    "text": "text",
-                    "url": "url",
-                    "files": [{"name": "file", "accept": ["application/pdf"]}],
-                },
-            },
-        },
-        media_type="application/manifest+json",
-    )
+    """Base manifest — no share_target. Used for PWA install prompt before login."""
+    return JSONResponse(content=_BASE_MANIFEST, media_type="application/manifest+json")
+
+
+@app.get("/manifest/{share_key}.json", include_in_schema=False)
+async def user_manifest_by_key(share_key: str, conn: DB):
+    """Stable per-user manifest with share_target. Safe to set as <link rel=manifest> after login."""
+    user = await db.get_user_by_share_key(conn, share_key)
+    if not user:
+        raise HTTPException(status_code=404)
+    return JSONResponse(content=_build_user_manifest(share_key), media_type="application/manifest+json")
+
+
+@app.get("/api/manifest", include_in_schema=False)
+async def api_manifest(current_user: CurrentUser, conn: DB):
+    """Returns the current user's share_key so the frontend can build their manifest URL."""
+    user = await db.get_user_by_id(conn, current_user["id"])
+    if not user:
+        raise HTTPException(status_code=404)
+    return {"share_key": user["share_key"]}
 
 
 # ---------------------------------------------------------------------------

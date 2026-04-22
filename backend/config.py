@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     chat_n_results: int = 8               # note chunks injected as RAG context
     chat_port: int = 8084                 # port for the RAG chat API
     whisper_base_url: str = "http://localhost:10300"
+    jwt_secret: str = ""
+    jwt_expiry_days: int = 30
 
     model_config = {"env_file": ".env"}
 
