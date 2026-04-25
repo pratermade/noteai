@@ -935,7 +935,45 @@ async def _log_router_interaction(
 
 def _build_router_messages(original: list[dict]) -> list[dict]:
     non_system = [m for m in original if m.get("role") != "system"]
-    return non_system[-settings.tool_router_context_messages:]
+    today = datetime.now().strftime("%Y-%m-%d")
+    system_msg = {"role": "system", "content": f"Today's date is {today}."}
+    return [system_msg] + non_system[-settings.tool_router_context_messages:]
+
+
+def _parse_xml_tool_calls(content: str) -> list[dict] | None:
+    """Parse <tool_call> XML blocks that some models emit instead of structured tool_calls."""
+    import re
+    calls = []
+    for block in re.finditer(r'<tool_call>(.*?)</tool_call>', content, re.DOTALL):
+        text = block.group(1).strip()
+        # JSON format: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+        try:
+            obj = json.loads(text)
+            if "name" in obj:
+                calls.append({
+                    "id": f"xml_{len(calls)}",
+                    "type": "function",
+                    "function": {
+                        "name": obj["name"],
+                        "arguments": json.dumps(obj.get("arguments", {})),
+                    },
+                })
+                continue
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # Parameter format: <function=name><parameter=key>value</parameter>...</function>
+        fn_m = re.search(r'<function=(\w+)>(.*?)</function>', text, re.DOTALL)
+        if fn_m:
+            args = {
+                pm.group(1): pm.group(2).strip()
+                for pm in re.finditer(r'<parameter=(\w+)>(.*?)</parameter>', fn_m.group(2), re.DOTALL)
+            }
+            calls.append({
+                "id": f"xml_{len(calls)}",
+                "type": "function",
+                "function": {"name": fn_m.group(1), "arguments": json.dumps(args)},
+            })
+    return calls or None
 
 
 async def _run_tool_router(
@@ -987,7 +1025,16 @@ async def _run_tool_router(
             return None
 
         if not tool_calls:
-            return raw_messages + accumulated, rounds_log
+            xml_calls = _parse_xml_tool_calls(message.get("content") or "")
+            if xml_calls:
+                import re as _re
+                clean = _re.sub(r'<tool_call>.*?</tool_call>', '', message.get("content", ""),
+                                flags=_re.DOTALL).strip()
+                message = {**message, "content": clean or None, "tool_calls": xml_calls}
+                tool_calls = xml_calls
+                logger.info("Router [round %d]: parsed %d XML tool call(s)", _round + 1, len(xml_calls))
+            else:
+                return raw_messages + accumulated, rounds_log
 
         round_entry: dict = {"round": _round + 1, "tool_calls": [], "tool_results": []}
         accumulated.append(message)
