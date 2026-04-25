@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import aiosqlite
 
 from .config import settings
-from .models import FOLDERS, NoteResponse, AttachmentResponse
+from .models import FOLDERS, NoteResponse, AttachmentResponse, ListItemResponse, NoteShareResponse
 
 
 def _now() -> str:
@@ -69,6 +69,25 @@ async def init_db(db: aiosqlite.Connection) -> None:
             key TEXT NOT NULL,
             value TEXT NOT NULL,
             PRIMARY KEY (user_id, key)
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS list_items (
+            id TEXT PRIMARY KEY,
+            note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            content TEXT NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS note_shares (
+            id TEXT PRIMARY KEY,
+            note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+            shared_with_user_id TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            UNIQUE(note_id, shared_with_user_id)
         )
     """)
     await db.commit()
@@ -191,6 +210,14 @@ async def get_user_by_share_key(db: aiosqlite.Connection, share_key: str) -> dic
             "created_at": row["created_at"]}
 
 
+async def list_users(db: aiosqlite.Connection) -> list[dict]:
+    async with db.execute(
+        "SELECT id, username, created_at FROM users ORDER BY created_at ASC"
+    ) as cur:
+        rows = await cur.fetchall()
+    return [{"id": r["id"], "username": r["username"], "created_at": r["created_at"]} for r in rows]
+
+
 async def get_first_user(db: aiosqlite.Connection) -> dict | None:
     async with db.execute(
         "SELECT id, username, share_key, created_at FROM users ORDER BY created_at ASC LIMIT 1"
@@ -225,7 +252,12 @@ async def get_note(db: aiosqlite.Connection, note_id: str,
                    user_id: str | None = None) -> NoteResponse | None:
     if user_id:
         async with db.execute(
-            "SELECT * FROM notes WHERE id = ? AND user_id = ?", (note_id, user_id)
+            "SELECT * FROM notes WHERE id = ? AND ("
+            "  user_id = ? OR id IN ("
+            "    SELECT note_id FROM note_shares WHERE shared_with_user_id = ?"
+            "  )"
+            ")",
+            (note_id, user_id, user_id),
         ) as cur:
             row = await cur.fetchone()
     else:
@@ -254,7 +286,31 @@ async def list_notes(db: aiosqlite.Connection, user_id: str | None = None,
     query += " ORDER BY updated_at DESC"
     async with db.execute(query, params) as cur:
         rows = await cur.fetchall()
-    return [_row_to_note(r) for r in rows]
+    owned = [_row_to_note(r) for r in rows]
+
+    # Include list notes shared with this user (when viewing Lists folder or all notes)
+    if user_id and (folder is None or folder == "Lists"):
+        owned_ids = {n.id for n in owned}
+        shared_q = (
+            "SELECT n.* FROM notes n"
+            " JOIN note_shares s ON s.note_id = n.id"
+            " WHERE s.shared_with_user_id = ? AND n.note_type = 'list'"
+        )
+        shared_params: list = [user_id]
+        if tag:
+            shared_q += " AND EXISTS (SELECT 1 FROM json_each(n.tags) WHERE value = ?)"
+            shared_params.append(tag)
+        if folder == "Lists":
+            shared_q += " AND n.folder = 'Lists'"
+        shared_q += " ORDER BY n.updated_at DESC"
+        async with db.execute(shared_q, shared_params) as cur:
+            shared_rows = await cur.fetchall()
+        shared = [_row_to_note(r) for r in shared_rows if r["id"] not in owned_ids]
+        all_notes = owned + shared
+        all_notes.sort(key=lambda n: n.updated_at, reverse=True)
+        return all_notes
+
+    return owned
 
 
 async def update_note(db: aiosqlite.Connection, note_id: str,
@@ -477,3 +533,147 @@ async def set_user_setting(db: aiosqlite.Connection, user_id: str, key: str,
         (user_id, key, value),
     )
     await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# List items
+# ---------------------------------------------------------------------------
+
+def _row_to_list_item(row: aiosqlite.Row) -> ListItemResponse:
+    return ListItemResponse(
+        id=row["id"],
+        note_id=row["note_id"],
+        content=row["content"],
+        completed=bool(row["completed"]),
+        position=row["position"],
+        created_at=row["created_at"],
+    )
+
+
+async def get_list_items(db: aiosqlite.Connection, note_id: str) -> list[ListItemResponse]:
+    async with db.execute(
+        "SELECT * FROM list_items WHERE note_id = ? ORDER BY position ASC, created_at ASC",
+        (note_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [_row_to_list_item(r) for r in rows]
+
+
+async def create_list_item(db: aiosqlite.Connection, note_id: str, content: str,
+                            position: int = 0) -> ListItemResponse:
+    item_id = str(uuid.uuid4())
+    now = _now()
+    await db.execute(
+        "INSERT INTO list_items (id, note_id, content, completed, position, created_at)"
+        " VALUES (?,?,?,0,?,?)",
+        (item_id, note_id, content, position, now),
+    )
+    await db.execute("UPDATE notes SET updated_at = ? WHERE id = ?", (now, note_id))
+    await db.commit()
+    async with db.execute("SELECT * FROM list_items WHERE id = ?", (item_id,)) as cur:
+        row = await cur.fetchone()
+    return _row_to_list_item(row)
+
+
+async def update_list_item(db: aiosqlite.Connection, item_id: str, note_id: str,
+                            **fields) -> ListItemResponse | None:
+    if not fields:
+        async with db.execute("SELECT * FROM list_items WHERE id = ? AND note_id = ?",
+                               (item_id, note_id)) as cur:
+            row = await cur.fetchone()
+        return _row_to_list_item(row) if row else None
+    if "completed" in fields:
+        fields["completed"] = int(fields["completed"])
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [item_id, note_id]
+    await db.execute(f"UPDATE list_items SET {sets} WHERE id = ? AND note_id = ?", values)
+    await db.execute("UPDATE notes SET updated_at = ? WHERE id = ?", (_now(), note_id))
+    await db.commit()
+    async with db.execute("SELECT * FROM list_items WHERE id = ? AND note_id = ?",
+                           (item_id, note_id)) as cur:
+        row = await cur.fetchone()
+    return _row_to_list_item(row) if row else None
+
+
+async def delete_list_item(db: aiosqlite.Connection, item_id: str, note_id: str) -> bool:
+    cur = await db.execute(
+        "DELETE FROM list_items WHERE id = ? AND note_id = ?", (item_id, note_id)
+    )
+    await db.execute("UPDATE notes SET updated_at = ? WHERE id = ?", (_now(), note_id))
+    await db.commit()
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Note shares
+# ---------------------------------------------------------------------------
+
+async def create_note_share(db: aiosqlite.Connection, note_id: str,
+                             shared_with_user_id: str) -> NoteShareResponse | None:
+    share_id = str(uuid.uuid4())
+    now = _now()
+    try:
+        await db.execute(
+            "INSERT INTO note_shares (id, note_id, shared_with_user_id, created_at)"
+            " VALUES (?,?,?,?)",
+            (share_id, note_id, shared_with_user_id, now),
+        )
+        await db.commit()
+    except Exception:
+        return None
+    return await _get_share_response(db, note_id, shared_with_user_id)
+
+
+async def delete_note_share(db: aiosqlite.Connection, note_id: str,
+                             shared_with_user_id: str) -> bool:
+    cur = await db.execute(
+        "DELETE FROM note_shares WHERE note_id = ? AND shared_with_user_id = ?",
+        (note_id, shared_with_user_id),
+    )
+    await db.commit()
+    return cur.rowcount > 0
+
+
+async def list_note_shares(db: aiosqlite.Connection,
+                            note_id: str) -> list[NoteShareResponse]:
+    async with db.execute(
+        "SELECT s.note_id, s.shared_with_user_id, u.username, s.created_at"
+        " FROM note_shares s JOIN users u ON u.id = s.shared_with_user_id"
+        " WHERE s.note_id = ? ORDER BY s.created_at ASC",
+        (note_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [NoteShareResponse(
+        note_id=r["note_id"],
+        shared_with_user_id=r["shared_with_user_id"],
+        shared_with_username=r["username"],
+        created_at=r["created_at"],
+    ) for r in rows]
+
+
+async def is_note_shared_with(db: aiosqlite.Connection, note_id: str,
+                               user_id: str) -> bool:
+    async with db.execute(
+        "SELECT 1 FROM note_shares WHERE note_id = ? AND shared_with_user_id = ?",
+        (note_id, user_id),
+    ) as cur:
+        return await cur.fetchone() is not None
+
+
+async def _get_share_response(db: aiosqlite.Connection, note_id: str,
+                               shared_with_user_id: str) -> NoteShareResponse | None:
+    async with db.execute(
+        "SELECT s.note_id, s.shared_with_user_id, u.username, s.created_at"
+        " FROM note_shares s JOIN users u ON u.id = s.shared_with_user_id"
+        " WHERE s.note_id = ? AND s.shared_with_user_id = ?",
+        (note_id, shared_with_user_id),
+    ) as cur:
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return NoteShareResponse(
+        note_id=row["note_id"],
+        shared_with_user_id=row["shared_with_user_id"],
+        shared_with_username=row["username"],
+        created_at=row["created_at"],
+    )
