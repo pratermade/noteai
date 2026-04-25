@@ -160,6 +160,7 @@ async def query_rag(messages: list[dict], user_id: str | None = None, skip_remin
         "messages": messages,
         "stream": False,
         "skip_reminders": skip_reminders,
+        "skip_footer": True,
     }
     if user_id:
         payload["user_id"] = user_id

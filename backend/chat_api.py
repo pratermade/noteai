@@ -1185,6 +1185,7 @@ class ChatRequest(BaseModel):
     max_tokens: int | None = None
     temperature: float | None = None
     skip_reminders: bool = False
+    skip_footer: bool = False
     user_id: str | None = None
 
 
@@ -1238,7 +1239,7 @@ async def chat_completions(body: ChatRequest):
                     for line in lines[:-1]:
                         if line.strip() == b"data: [DONE]":
                             used_sources = _filter_sources_by_citations(response_text, sources)
-                            footer = _format_sources_md(used_sources) + reminders_md
+                            footer = "" if body.skip_footer else (_format_sources_md(used_sources) + reminders_md)
                             if footer:
                                 src_chunk = json.dumps({
                                     "id": "chatcmpl-src",
@@ -1282,7 +1283,7 @@ async def chat_completions(body: ChatRequest):
             try:
                 response_text = data["choices"][0]["message"].get("content") or ""
                 used_sources = _filter_sources_by_citations(response_text, sources)
-                footer = _format_sources_md(used_sources) + reminders_md
+                footer = "" if body.skip_footer else (_format_sources_md(used_sources) + reminders_md)
                 if footer:
                     data["choices"][0]["message"]["content"] = response_text + footer
             except (KeyError, IndexError, TypeError):
@@ -1315,7 +1316,7 @@ async def chat_completions(body: ChatRequest):
             try:
                 response_text = message.get("content") or ""
                 used_sources = _filter_sources_by_citations(response_text, sources)
-                footer = _format_sources_md(used_sources) + reminders_md
+                footer = "" if body.skip_footer else (_format_sources_md(used_sources) + reminders_md)
                 if footer:
                     data["choices"][0]["message"]["content"] = response_text + footer
             except (KeyError, IndexError, TypeError):
