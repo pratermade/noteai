@@ -273,28 +273,6 @@ _LIST_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "list_my_lists",
-            "description": "Get all list notes the user owns or has been shared with them. Use this when you need to browse all lists. If the user mentions a specific list by name, prefer find_list_by_name instead.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_list_by_name",
-            "description": "Find a list note by name using a case-insensitive partial match. Use this whenever the user refers to a list by name (e.g. 'shopping list', 'grocery', 'to-do'). Returns all lists whose title contains the search term.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Partial or full list name to search for"},
-                },
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "get_list_items",
             "description": "Get all items in a specific list note.",
             "parameters": {
@@ -545,76 +523,12 @@ async def _check_list_access(conn: aiosqlite.Connection, note_id: str,
         return await cur.fetchone() is not None
 
 
-async def _tool_list_my_lists(user_id: str | None) -> str:
-    logger.debug("_tool_list_my_lists user=%s", user_id)
-    if not user_id:
-        logger.warning("_tool_list_my_lists: no user context")
-        return json.dumps({"error": "No user context"})
-    try:
-        async with aiosqlite.connect(settings.database_url) as conn:
-            conn.row_factory = aiosqlite.Row
-            async with conn.execute(
-                "SELECT id, title FROM notes WHERE user_id = ? AND note_type = 'list'"
-                " ORDER BY updated_at DESC",
-                (user_id,),
-            ) as cur:
-                owned = await cur.fetchall()
-            async with conn.execute(
-                "SELECT n.id, n.title FROM notes n"
-                " JOIN note_shares s ON s.note_id = n.id"
-                " WHERE s.shared_with_user_id = ? AND n.note_type = 'list'"
-                " ORDER BY n.updated_at DESC",
-                (user_id,),
-            ) as cur:
-                shared = await cur.fetchall()
-        lists = [{"id": r["id"], "title": r["title"], "shared": False} for r in owned]
-        lists += [{"id": r["id"], "title": r["title"], "shared": True} for r in shared]
-        return json.dumps({"lists": lists})
-    except Exception as exc:
-        logger.error("_tool_list_my_lists failed: %s", exc, exc_info=True)
-        return json.dumps({"error": str(exc)})
-
-
-async def _tool_find_list_by_name(name: str, user_id: str | None) -> str:
-    logger.debug("_tool_find_list_by_name name=%r user=%s", name, user_id)
-    if not user_id:
-        logger.warning("_tool_find_list_by_name: no user context")
-        return json.dumps({"error": "No user context"})
-    try:
-        pattern = f"%{name}%"
-        async with aiosqlite.connect(settings.database_url) as conn:
-            conn.row_factory = aiosqlite.Row
-            async with conn.execute(
-                "SELECT id, title FROM notes"
-                " WHERE user_id = ? AND note_type = 'list' AND title LIKE ? COLLATE NOCASE"
-                " ORDER BY updated_at DESC",
-                (user_id, pattern),
-            ) as cur:
-                owned = await cur.fetchall()
-            async with conn.execute(
-                "SELECT n.id, n.title FROM notes n"
-                " JOIN note_shares s ON s.note_id = n.id"
-                " WHERE s.shared_with_user_id = ? AND n.note_type = 'list'"
-                " AND n.title LIKE ? COLLATE NOCASE"
-                " ORDER BY n.updated_at DESC",
-                (user_id, pattern),
-            ) as cur:
-                shared = await cur.fetchall()
-        lists = [{"id": r["id"], "title": r["title"], "shared": False} for r in owned]
-        owned_ids = {r["id"] for r in owned}
-        lists += [{"id": r["id"], "title": r["title"], "shared": True} for r in shared if r["id"] not in owned_ids]
-        return json.dumps({"lists": lists})
-    except Exception as exc:
-        logger.error("_tool_find_list_by_name failed: %s", exc, exc_info=True)
-        return json.dumps({"error": str(exc)})
-
-
-async def _tool_get_list_items(note_id: str, user_id: str | None) -> str:
+async def _tool_get_list_items(note_id: str, user_id: str) -> str:
     logger.debug("_tool_get_list_items note_id=%s user=%s", note_id, user_id)
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
-            if user_id and not await _check_list_access(conn, note_id, user_id):
+            if not await _check_list_access(conn, note_id, user_id):
                 logger.warning("_tool_get_list_items: access denied note_id=%s user=%s", note_id, user_id)
                 return json.dumps({"error": "Note not found or access denied"})
             async with conn.execute(
@@ -666,14 +580,14 @@ async def _tool_add_list_item(note_id: str, content: str, user_id: str) -> str:
         return json.dumps({"error": str(exc)})
 
 
-async def _tool_complete_list_item(note_id: str, item_id: str, user_id: str | None) -> str:
+async def _tool_complete_list_item(note_id: str, item_id: str, user_id: str) -> str:
     logger.debug("_tool_complete_list_item note_id=%s item_id=%s user=%s", note_id, item_id, user_id)
     try:
         now = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
-            if user_id and not await _check_list_access(conn, note_id, user_id):
+            if not await _check_list_access(conn, note_id, user_id):
                 logger.warning("_tool_complete_list_item: access denied note_id=%s user=%s", note_id, user_id)
                 return json.dumps({"error": "Note not found or access denied"})
             cur = await conn.execute(
@@ -693,14 +607,14 @@ async def _tool_complete_list_item(note_id: str, item_id: str, user_id: str | No
         return json.dumps({"error": str(exc)})
 
 
-async def _tool_delete_list_item(note_id: str, item_id: str, user_id: str | None) -> str:
+async def _tool_delete_list_item(note_id: str, item_id: str, user_id: str) -> str:
     logger.debug("_tool_delete_list_item note_id=%s item_id=%s user=%s", note_id, item_id, user_id)
     try:
         now = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
-            if user_id and not await _check_list_access(conn, note_id, user_id):
+            if not await _check_list_access(conn, note_id, user_id):
                 logger.warning("_tool_delete_list_item: access denied note_id=%s user=%s", note_id, user_id)
                 return json.dumps({"error": "Note not found or access denied"})
             cur = await conn.execute(
@@ -720,11 +634,8 @@ async def _tool_delete_list_item(note_id: str, item_id: str, user_id: str | None
         return json.dumps({"error": str(exc)})
 
 
-async def _tool_create_list(title: str, user_id: str | None) -> str:
-    logger.debug("_tool_create_list title=%r user=%s", title, user_id)
-    if not user_id:
-        logger.warning("_tool_create_list: no user context")
-        return json.dumps({"error": "No user context — cannot create a list"})
+async def _tool_create_list(title: str, user_id: str, item_id: str | None = None) -> str:
+    logger.debug("_tool_create_list title=%r item_id=%r user=%s", title, item_id, user_id)
     try:
         note_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -736,8 +647,18 @@ async def _tool_create_list(title: str, user_id: str | None) -> str:
                 " VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (note_id, user_id, title, "", "[]", "Lists", now, now, "list", now),
             )
+            if item_id:
+                item_uuid = str(uuid.uuid4())
+                await conn.execute(
+                    "INSERT INTO list_items (id, note_id, content, completed, position, created_at)"
+                    " VALUES (?,?,?,0,0,?)",
+                    (item_uuid, note_id, item_id, now),
+                )
             await conn.commit()
-        return json.dumps({"note_id": note_id, "title": title})
+        result = {"note_id": note_id, "title": title}
+        if item_id:
+            result["item_id"] = item_uuid  # type: ignore[assignment]
+        return json.dumps(result)
     except Exception as exc:
         logger.error("_tool_create_list failed: %s", exc, exc_info=True)
         return json.dumps({"error": str(exc)})
@@ -857,26 +778,26 @@ async def _tool_create_journal_entry(content: str | None, user_id: str) -> str:
 
 
 async def _execute_tool(name: str, arguments: dict, user_id: str | None) -> str:
-    if name == "list_my_lists":
-        return await _tool_list_my_lists(user_id)
-    if name == "find_list_by_name":
-        return await _tool_find_list_by_name(arguments.get("name", ""), user_id)
+    if name in ("get_list_items", "add_list_item", "complete_list_item",
+                "delete_list_item", "create_list"):
+        if not user_id:
+            return json.dumps({"error": "No user context"})
     if name == "get_list_items":
-        return await _tool_get_list_items(arguments.get("note_id", ""), user_id)
+        return await _tool_get_list_items(arguments.get("note_id", ""), user_id)  # type: ignore[arg-type]
     if name == "add_list_item":
         return await _tool_add_list_item(
-            arguments.get("note_id", ""), arguments.get("content", ""), user_id
+            arguments.get("note_id", ""), arguments.get("content", ""), user_id  # type: ignore[arg-type]
         )
     if name == "complete_list_item":
         return await _tool_complete_list_item(
-            arguments.get("note_id", ""), arguments.get("item_id", ""), user_id
+            arguments.get("note_id", ""), arguments.get("item_id", ""), user_id  # type: ignore[arg-type]
         )
     if name == "delete_list_item":
         return await _tool_delete_list_item(
-            arguments.get("note_id", ""), arguments.get("item_id", ""), user_id
+            arguments.get("note_id", ""), arguments.get("item_id", ""), user_id  # type: ignore[arg-type]
         )
     if name == "create_list":
-        return await _tool_create_list(arguments.get("title", ""), user_id)
+        return await _tool_create_list(arguments.get("title", ""), user_id, arguments.get("item_id"))  # type: ignore[arg-type]
     if name == "create_note":
         if not user_id:
             return json.dumps({"error": "No user context"})
@@ -967,16 +888,7 @@ async def _execute_router_tool(name: str, arguments: dict, user_id: str | None) 
             return await _tool_delete_list_item(note_id, item_id, user_id)
 
     if name == "create_list":
-        result = await _tool_create_list(arguments.get("title", ""), user_id)
-        initial_item = arguments.get("item_id")
-        if initial_item:
-            try:
-                note_id = json.loads(result).get("note_id")
-                if note_id:
-                    await _tool_add_list_item(note_id, initial_item, user_id)
-            except (json.JSONDecodeError, AttributeError):
-                pass
-        return result
+        return await _tool_create_list(arguments.get("title", ""), user_id, arguments.get("item_id"))
 
     return json.dumps({"error": f"Unknown tool: {name}"})
 
