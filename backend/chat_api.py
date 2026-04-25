@@ -515,12 +515,17 @@ _ROUTER_TOOLS = [
 def resolve_due_date(raw: str) -> str:
     """Convert natural language or ISO date to ISO datetime string."""
     import dateparser
-    parsed = dateparser.parse(raw, settings={
-        "PREFER_DATES_FROM": "future",
-        "RELATIVE_BASE": datetime.now(),
-    })
-    if parsed:
-        return parsed.strftime("%Y-%m-%dT%H:%M:%S")
+    dp_settings = {"PREFER_DATES_FROM": "future", "RELATIVE_BASE": datetime.now()}
+    try:
+        parsed = dateparser.parse(raw, languages=["en"], settings=dp_settings)
+        if parsed is None:
+            stripped = re.sub(r"^(next|this|on|by)\s+", "", raw.strip(), flags=re.I)
+            if stripped != raw.strip():
+                parsed = dateparser.parse(stripped, languages=["en"], settings=dp_settings)
+        if parsed:
+            return parsed.strftime("%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        pass
     return raw
 
 
