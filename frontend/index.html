@@ -36,7 +36,10 @@
 <aside id="sidebar">
   <div id="sidebar-header">
     <h1>NoterAI</h1>
-    <button id="btn-new-note">+ New</button>
+    <div id="new-note-btns">
+      <button id="btn-new-note">+ Note</button>
+      <button id="btn-new-list">+ List</button>
+    </div>
   </div>
   <nav id="sidebar-nav">
     <div id="btn-tasks" class="nav-item">☑ Next Tasks</div>
@@ -105,18 +108,16 @@
         <select id="folder-input">
           <option value="Unfiled">Unfiled</option>
           <option value="Reference">Reference</option>
-          <option value="Ideas">Ideas</option>
           <option value="Todo">Todo</option>
-          <option value="Review Later">Review Later</option>
-          <option value="Projects">Projects</option>
           <option value="Journal">Journal</option>
-          <option value="Resources">Resources</option>
+          <option value="Lists">Lists</option>
           <option value="Archive">Archive</option>
         </select>
       </div>
       <div class="meta-field">
         <label>Reminder</label>
-        <input type="date" id="reminder-input" />
+        <input type="date" id="reminder-date-input" />
+        <input type="time" id="reminder-time-input" placeholder="08:00" />
         <button id="btn-reminder-done" style="display:none">✓ Done</button>
       </div>
       <div class="meta-field">
@@ -128,6 +129,21 @@
       </div>
     </div>
     <div id="note-summary-section" style="display:none"></div>
+    <!-- List items section (visible for list notes) -->
+    <div id="list-items-section" style="display:none">
+      <div id="list-items-container"></div>
+      <div id="list-item-input-row">
+        <input id="list-item-input" type="text" placeholder="Add item, press Enter…" autocomplete="off" />
+        <button id="btn-add-list-item">+ Add</button>
+      </div>
+    </div>
+    <!-- Share section (visible for list notes) -->
+    <div id="list-share-section" style="display:none">
+      <div class="meta-field">
+        <label>Shared with</label>
+        <div id="list-share-users"></div>
+      </div>
+    </div>
     <div id="attachments-section">
       <div id="drop-zone">
         Drop a PDF here or <u>click to choose</u>
@@ -239,6 +255,14 @@
           <div class="settings-field">
             <label>Max Conversation History</label>
             <input id="tg-max-history" type="number" min="1" max="100" placeholder="20" />
+          </div>
+          <div class="settings-field">
+            <label>My Telegram User ID <span class="settings-hint-inline">(links your account — use /chatid in the bot)</span></label>
+            <input id="tg-my-user-id" type="text" placeholder="e.g. 123456789" />
+          </div>
+          <div class="settings-field">
+            <label>Bot User <span class="settings-hint-inline">(whose notes the bot searches when no match)</span></label>
+            <select id="tg-bot-user"></select>
           </div>
         </div>
         <div class="settings-section-footer">

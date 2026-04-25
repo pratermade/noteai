@@ -114,6 +114,10 @@ let state = {
   currentNoteSummary: null,
   reminderDone: false,
   tasksMode: false,
+  listItems: [],
+  listPollTimer: null,
+  noteListPollTimer: null,
+  currentNoteOwnerId: null,
 };
 
 marked.use({ gfm: true, breaks: true });
@@ -127,8 +131,9 @@ const noteListPanel = $('note-list-panel');
 const titleInput    = $('note-title-input');
 const contentArea   = $('note-content');
 const folderInput    = $('folder-input');
-const reminderInput  = $('reminder-input');
-const btnReminderDone = $('btn-reminder-done');
+const reminderDateInput = $('reminder-date-input');
+const reminderTimeInput = $('reminder-time-input');
+const btnReminderDone   = $('btn-reminder-done');
 const tagInput      = $('tag-input');
 const tagChips      = $('tag-chips');
 const saveBadge     = $('save-badge');
@@ -233,7 +238,7 @@ function renderNoteList(notes) {
       <div class="note-card-meta">
         <span class="note-type-badge type-${noteType}">${noteType}</span>
         ${n.folder ? `<span>📁 ${esc(n.folder)}</span>` : ''}
-        ${n.reminder_at && !n.reminder_done ? `<span title="Reminder: ${esc(n.reminder_at)}">🔔</span>` : ''}
+        ${n.reminder_at && !n.reminder_done ? `<span title="Reminder: ${esc(formatReminderDate(n.reminder_at))}">🔔</span>` : ''}
         ${tagHtml}
         <span>${relTime(n.updated_at)}</span>
         ${n.indexed_at ? '' : '<span style="color:var(--warn)">⏳ unindexed</span>'}
@@ -310,6 +315,201 @@ function renderSummarySection() {
   noteSummarySection.style.display = 'flex';
 }
 
+// ── List items ─────────────────────────────────────────────────────────────
+
+async function loadListItems(noteId) {
+  try {
+    state.listItems = await apiFetch(`/api/notes/${noteId}/items`);
+    renderListItems(state.listItems);
+  } catch (e) {
+    console.error('loadListItems', e);
+  }
+}
+
+function renderListItems(items) {
+  const container = $('list-items-container');
+  container.innerHTML = '';
+  for (const item of items) {
+    container.appendChild(makeListItemEl(item));
+  }
+}
+
+function makeListItemEl(item) {
+  const row = document.createElement('div');
+  row.className = 'list-item-row' + (item.completed ? ' list-item-done' : '');
+  row.dataset.id = item.id;
+  row.innerHTML = `
+    <input type="checkbox" class="list-item-check" ${item.completed ? 'checked' : ''} />
+    <span class="list-item-text">${esc(item.content)}</span>
+    <button class="list-item-del" title="Remove">✕</button>`;
+  row.querySelector('.list-item-check').addEventListener('change', async (e) => {
+    const completed = e.target.checked;
+    row.classList.toggle('list-item-done', completed);
+    _pendingListItems.add(item.id);
+    try {
+      await apiFetch(`/api/notes/${state.currentNoteId}/items/${item.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ completed }),
+      });
+      const li = state.listItems.find(i => i.id === item.id);
+      if (li) li.completed = completed;
+    } catch (err) {
+      e.target.checked = !completed;
+      row.classList.toggle('list-item-done', !completed);
+      toast('Could not update item', 'error');
+    } finally {
+      _pendingListItems.delete(item.id);
+    }
+  });
+  row.querySelector('.list-item-del').addEventListener('click', async () => {
+    _pendingListItems.add(item.id);
+    try {
+      await apiFetch(`/api/notes/${state.currentNoteId}/items/${item.id}`, { method: 'DELETE' });
+      state.listItems = state.listItems.filter(i => i.id !== item.id);
+      row.remove();
+    } catch (err) {
+      toast('Could not delete item', 'error');
+    } finally {
+      _pendingListItems.delete(item.id);
+    }
+  });
+  return row;
+}
+
+function syncListItems(incoming) {
+  const container = $('list-items-container');
+  const incomingMap = new Map(incoming.map(i => [i.id, i]));
+  const currentMap  = new Map(state.listItems.map(i => [i.id, i]));
+
+  // Remove items no longer on the server
+  for (const id of currentMap.keys()) {
+    if (!incomingMap.has(id)) {
+      container.querySelector(`[data-id="${id}"]`)?.remove();
+    }
+  }
+
+  // Add new items and update changed ones
+  for (const item of incoming) {
+    const existing = container.querySelector(`[data-id="${item.id}"]`);
+    if (!existing) {
+      container.appendChild(makeListItemEl(item));
+    } else if (!_pendingListItems.has(item.id)) {
+      const prev = currentMap.get(item.id);
+      if (prev && prev.completed !== item.completed) {
+        existing.querySelector('.list-item-check').checked = item.completed;
+        existing.classList.toggle('list-item-done', item.completed);
+      }
+      if (prev && prev.content !== item.content) {
+        existing.querySelector('.list-item-text').textContent = item.content;
+      }
+    }
+  }
+
+  state.listItems = incoming;
+}
+
+function startListPoll(noteId) {
+  clearInterval(state.listPollTimer);
+  let failures = 0;
+  state.listPollTimer = setInterval(async () => {
+    if (state.currentNoteId !== noteId) { clearInterval(state.listPollTimer); return; }
+    try {
+      const items = await apiFetch(`/api/notes/${noteId}/items`);
+      failures = 0;
+      syncListItems(items);
+    } catch {
+      if (++failures >= 3) clearInterval(state.listPollTimer);
+    }
+  }, 3000);
+}
+
+async function addListItem(content) {
+  if (!state.currentNoteId || !content.trim()) return;
+  const position = state.listItems.length;
+  try {
+    const item = await apiFetch(`/api/notes/${state.currentNoteId}/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content.trim(), position }),
+    });
+    state.listItems.push(item);
+    $('list-items-container').appendChild(makeListItemEl(item));
+  } catch (e) {
+    toast('Could not add item: ' + e.message, 'error');
+  }
+}
+
+$('list-item-input').addEventListener('keydown', async (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const input = $('list-item-input');
+    await addListItem(input.value);
+    input.value = '';
+  }
+});
+
+$('btn-add-list-item').addEventListener('click', async () => {
+  const input = $('list-item-input');
+  await addListItem(input.value);
+  input.value = '';
+});
+
+// ── List sharing ───────────────────────────────────────────────────────────
+
+async function loadListShares(noteId) {
+  try {
+    const [shares, users] = await Promise.all([
+      apiFetch(`/api/notes/${noteId}/shares`),
+      apiFetch('/api/users'),
+    ]);
+    renderListShares(shares, users, noteId);
+  } catch (e) {
+    console.error('loadListShares', e);
+  }
+}
+
+function renderListShares(shares, users, noteId) {
+  const container = $('list-share-users');
+  container.innerHTML = '';
+  const sharedIds = new Set(shares.map(s => s.shared_with_user_id));
+  // Only show other users
+  const others = users.filter(u => u.id !== (state.currentUserId || ''));
+  if (!others.length) {
+    container.innerHTML = '<span style="color:var(--muted);font-size:13px">No other users in the system.</span>';
+    return;
+  }
+  for (const user of others) {
+    const isShared = sharedIds.has(user.id);
+    const row = document.createElement('div');
+    row.className = 'share-user-row';
+    row.innerHTML = `
+      <span class="share-username">${esc(user.username)}</span>
+      <button class="btn-share-toggle ${isShared ? 'shared' : ''}" data-uid="${user.id}">
+        ${isShared ? 'Shared ✓' : 'Share'}
+      </button>`;
+    const btn = row.querySelector('.btn-share-toggle');
+    btn.addEventListener('click', async () => {
+      const uid = btn.dataset.uid;
+      const currently = btn.classList.contains('shared');
+      try {
+        if (currently) {
+          await apiFetch(`/api/notes/${noteId}/shares/${uid}`, { method: 'DELETE' });
+          btn.classList.remove('shared');
+          btn.textContent = 'Share';
+        } else {
+          await apiFetch(`/api/notes/${noteId}/shares/${uid}`, { method: 'POST' });
+          btn.classList.add('shared');
+          btn.textContent = 'Shared ✓';
+        }
+      } catch (err) {
+        toast('Could not update sharing: ' + err.message, 'error');
+      }
+    });
+    container.appendChild(row);
+  }
+}
+
 function setEditMode(isEdit) {
   state.editMode = isEdit;
   if (isEdit) {
@@ -334,13 +534,34 @@ async function openNote(id) {
     titleInput.value    = note.title;
     contentArea.value   = note.content;
     folderInput.value   = note.folder;
-    reminderInput.value = note.reminder_at || '';
+    if (note.reminder_at) {
+      reminderDateInput.value = note.reminder_at.substring(0, 10);
+      reminderTimeInput.value = note.reminder_at.substring(11, 16) || '08:00';
+    } else {
+      reminderDateInput.value = '';
+      reminderTimeInput.value = '';
+    }
     state.reminderDone  = note.reminder_done || false;
     updateReminderDoneBtn();
     renderTagChips(note.tags);
     state.attachmentSummaries = [];
     state.currentNoteType = note.note_type || 'markdown';
     state.currentNoteSummary = note.note_summary || null;
+
+    const isList = state.currentNoteType === 'list';
+    $('list-items-section').style.display  = isList ? '' : 'none';
+    $('list-share-section').style.display  = isList ? '' : 'none';
+    $('attachments-section').style.display = isList ? 'none' : '';
+    contentArea.style.display              = isList ? 'none' : '';
+    notePreview.style.display              = 'none';
+    btnEditToggle.style.display            = isList ? 'none' : '';
+
+    if (isList) {
+      await loadListItems(id);
+      await loadListShares(id);
+      startListPoll(id);
+    }
+
     const videoId = state.currentNoteType === 'video' ? getYouTubeVideoId(note.content) : null;
     const videoEmbed = $('video-embed');
     const videoIframe = $('video-iframe');
@@ -351,9 +572,11 @@ async function openNote(id) {
       videoIframe.src = '';
       videoEmbed.style.display = 'none';
     }
-    dropZone.style.display = '';
-    renderSummarySection();
-    setEditMode(false);
+    if (!isList) {
+      dropZone.style.display = '';
+      renderSummarySection();
+      setEditMode(false);
+    }
     setBadge('');
     settingsView.style.display    = 'none';
     editorPanel.style.display = 'flex';
@@ -361,7 +584,7 @@ async function openNote(id) {
     noteListPanel.style.display = 'none';
     closeSidebar();
     highlightActiveCard(id);
-    await loadAttachments(id);
+    if (!isList) await loadAttachments(id);
     if (!note.indexed_at) startIndexPoll(id);
   } catch (e) {
     console.error('openNote', e);
@@ -373,9 +596,15 @@ function closeEditor() {
   clearTimers();
   state.currentNoteId = null;
   state.editMode = false;
+  state.listItems = [];
   notePreview.innerHTML = '';
   $('video-iframe').src = '';
   $('video-embed').style.display = 'none';
+  $('list-items-section').style.display = 'none';
+  $('list-share-section').style.display = 'none';
+  $('attachments-section').style.display = '';
+  contentArea.style.display = '';
+  btnEditToggle.style.display = '';
   editorPanel.style.display = 'none';
   if (state.tasksMode) {
     openTasksPanel();
@@ -432,7 +661,9 @@ async function saveNote() {
   const content     = contentArea.value;
   const folder      = folderInput.value.trim() || 'Unfiled';
   const tags        = getCurrentTags();
-  const reminder_at = reminderInput.value || null;
+  const _rDate = reminderDateInput.value;
+  const _rTime = reminderTimeInput.value || '08:00';
+  const reminder_at = _rDate ? `${_rDate}T${_rTime}:00` : null;
   const reminder_done = state.reminderDone;
 
   setBadge('saving');
@@ -588,6 +819,13 @@ async function openTasksPanel() {
   }
 }
 
+function formatReminderDate(isoStr) {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  if (isNaN(d)) return isoStr;
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
 function renderTasksPanel(tasks) {
   const listEl = $('tasks-list');
   listEl.innerHTML = '';
@@ -604,7 +842,7 @@ function renderTasksPanel(tasks) {
     row.innerHTML = `
       <input type="checkbox" class="task-checkbox" title="Mark done" />
       <span class="task-item-title">${esc(t.title)}</span>
-      <span class="task-item-date" style="color:${dateColor}">${t.reminder_at}</span>`;
+      <span class="task-item-date" style="color:${dateColor}">${formatReminderDate(t.reminder_at)}</span>`;
     row.querySelector('.task-item-title').addEventListener('click', () => openNote(t.id));
     row.querySelector('.task-checkbox').addEventListener('change', async (e) => {
       if (!e.target.checked) return;
@@ -669,6 +907,7 @@ function setFilter(tag, folder) {
   editorPanel.style.display = 'none';
   loadNotes();
   renderSidebar();
+  startNoteListPoll();
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────
@@ -780,6 +1019,7 @@ async function downloadAtt(attId) {
 
 // ── Delete attachment (inline confirm) ────────────────────────────────────
 
+const _pendingListItems = new Set();  // item IDs with in-flight API requests
 const _deleteAttConfirm = new Set();
 
 async function deleteAtt(attId) {
@@ -1015,16 +1255,24 @@ dictateBtn.addEventListener('click', () => {
 $('btn-new-note').addEventListener('click', () => {
   clearTimers();
   state.currentNoteId = null;
+  state.currentNoteType = 'markdown';
+  state.listItems = [];
   titleInput.value  = '';
   contentArea.value = '';
   folderInput.value = 'Unfiled';
-  reminderInput.value = '';
+  reminderDateInput.value = '';
+  reminderTimeInput.value = '';
   state.reminderDone = false;
   updateReminderDoneBtn();
   renderTagChips([]);
   setBadge('');
   attList.innerHTML = '';
   notePreview.innerHTML = '';
+  $('list-items-section').style.display = 'none';
+  $('list-share-section').style.display = 'none';
+  $('attachments-section').style.display = '';
+  contentArea.style.display = '';
+  btnEditToggle.style.display = '';
   state.tasksMode = false;
   settingsView.style.display    = 'none';
   $('tasks-panel').style.display = 'none';
@@ -1035,6 +1283,61 @@ $('btn-new-note').addEventListener('click', () => {
   closeSidebar();
   setEditMode(true);
   titleInput.focus();
+});
+
+$('btn-new-list').addEventListener('click', async () => {
+  clearTimers();
+  state.tasksMode = false;
+  settingsView.style.display    = 'none';
+  $('tasks-panel').style.display = 'none';
+  $('btn-tasks').classList.remove('active');
+  closeSidebar();
+  editorPanel.style.display = 'flex';
+  editorPanel.style.flexDirection = 'column';
+  noteListPanel.style.display = 'none';
+
+  titleInput.value    = 'New List';
+  contentArea.value   = '';
+  folderInput.value   = 'Lists';
+  reminderDateInput.value = '';
+  reminderTimeInput.value = '';
+  state.reminderDone  = false;
+  updateReminderDoneBtn();
+  renderTagChips([]);
+  attList.innerHTML   = '';
+  notePreview.innerHTML = '';
+  state.currentNoteType = 'list';
+  state.listItems = [];
+  state.currentNoteId   = null;
+  $('list-items-section').style.display = '';
+  $('list-share-section').style.display = 'none';
+  $('attachments-section').style.display = 'none';
+  contentArea.style.display = 'none';
+  btnEditToggle.style.display = 'none';
+  $('list-items-container').innerHTML = '';
+  $('list-share-users').innerHTML = '';
+
+  setBadge('saving');
+  try {
+    const note = await apiFetch('/api/notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'New List', content: '', folder: 'Lists', tags: [], note_type: 'list' }),
+    });
+    state.currentNoteId = note.id;
+    setBadge('saved');
+    highlightActiveCard(note.id);
+    await loadNotes();
+    await loadSidebar();
+    await loadListShares(note.id);
+    $('list-share-section').style.display = '';
+    startListPoll(note.id);
+    titleInput.focus();
+    titleInput.select();
+  } catch (e) {
+    setBadge('error');
+    toast('Failed to create list: ' + e.message, 'error');
+  }
 });
 
 $('btn-tasks').addEventListener('click', openTasksPanel);
@@ -1059,7 +1362,7 @@ contentArea.addEventListener('input', () => {
 });
 
 function updateReminderDoneBtn() {
-  if (!reminderInput.value) {
+  if (!reminderDateInput.value) {
     btnReminderDone.style.display = 'none';
     return;
   }
@@ -1068,10 +1371,14 @@ function updateReminderDoneBtn() {
   btnReminderDone.disabled = state.reminderDone;
 }
 
-reminderInput.addEventListener('change', () => {
+reminderDateInput.addEventListener('change', () => {
   state.reminderDone = false;
   state.saveDirty = true;
   updateReminderDoneBtn();
+});
+
+reminderTimeInput.addEventListener('change', () => {
+  state.saveDirty = true;
 });
 
 btnReminderDone.addEventListener('click', async () => {
@@ -1085,6 +1392,26 @@ btnReminderDone.addEventListener('click', async () => {
 function clearTimers() {
   clearInterval(state.indexPollTimer);
   clearInterval(state.attPollTimer);
+  clearInterval(state.listPollTimer);
+  clearInterval(state.noteListPollTimer);
+  state.noteListPollTimer = null;
+}
+
+function startNoteListPoll() {
+  clearInterval(state.noteListPollTimer);
+  state.noteListPollTimer = setInterval(async () => {
+    if (state.searchMode || editorPanel.style.display !== 'none' || settingsView.style.display !== 'none') return;
+    try {
+      const params = new URLSearchParams();
+      if (state.filterTag)          params.set('tag',    state.filterTag);
+      if (state.filterFolder !== null) params.set('folder', state.filterFolder);
+      const fresh = await apiFetch(`/api/notes?${params}`);
+      if (fresh.length !== state.notes.length || fresh.some((n, i) => n.id !== (state.notes[i] || {}).id)) {
+        state.notes = fresh;
+        renderNoteList(fresh);
+      }
+    } catch {}
+  }, 15000);
 }
 
 function esc(str) {
@@ -1163,7 +1490,10 @@ let _loadedTgCredentials = {};
 
 async function loadSettings() {
   try {
-    const data = await apiFetch('/api/settings');
+    const [data, users] = await Promise.all([
+      apiFetch('/api/settings'),
+      apiFetch('/api/users'),
+    ]);
     renderReminderTimes(data.reminder_times);
     renderJournalReminderTimes(data.journal_reminder_times || []);
     $('tg-bot-token').value         = data.telegram_bot_token || '';
@@ -1172,8 +1502,13 @@ async function loadSettings() {
     $('tg-rag-url').value           = data.telegram_rag_url || '';
     $('tg-rag-model').value         = data.telegram_rag_model || '';
     $('tg-max-history').value       = data.telegram_max_history || '';
+    $('tg-my-user-id').value        = data.telegram_user_id || '';
     $('character-prompt').value     = data.character_prompt || '';
-    $('server-timezone').value = data.server_timezone || '';
+    $('server-timezone').value      = data.server_timezone || '';
+    const botUserSel = $('tg-bot-user');
+    botUserSel.innerHTML = users.map(u =>
+      `<option value="${u.id}"${u.id === data.telegram_bot_user_id ? ' selected' : ''}>${u.username}</option>`
+    ).join('');
     _loadedTgCredentials = {
       tz:      data.server_timezone || '',
       token:   data.telegram_bot_token || '',
@@ -1222,6 +1557,8 @@ $('btn-settings-save').addEventListener('click', async () => {
     telegram_rag_model: $('tg-rag-model').value.trim() || undefined,
     telegram_max_history: maxHist || undefined,
     character_prompt: $('character-prompt').value.trim() || undefined,
+    telegram_bot_user_id: $('tg-bot-user').value || undefined,
+    telegram_user_id: $('tg-my-user-id').value.trim() || undefined,
   };
   // Drop undefined keys so PATCH treats them as "don't change"
   Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
@@ -1346,7 +1683,14 @@ $('btn-settings').addEventListener('click', () => {
 // ── Init ───────────────────────────────────────────────────────────────────
 
 async function init() {
+  try {
+    const me = await apiFetch('/api/auth/me');
+    state.currentUserId = me.id;
+    const usernameEl = $('sidebar-username');
+    if (usernameEl) usernameEl.textContent = me.username;
+  } catch {}
   await loadNotes();
+  startNoteListPoll();
   await loadSidebar();
   await loadSettings();
   apiFetch('/api/version').then(d => {
