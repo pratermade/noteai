@@ -960,8 +960,12 @@ def _build_router_messages(original: list[dict]) -> list[dict]:
         "role": "system",
         "content": (
             f"Current date and time: {now_str}. "
-            "For due_date, pass the user's exact phrasing (e.g. 'tomorrow', 'next Monday', 'in 2 hours') — "
-            "the system will resolve it to an exact date automatically."
+            "For due_date you MUST copy the user's exact words verbatim — "
+            "do NOT compute or convert the date yourself. "
+            "Examples: user says 'friday' → pass 'friday'; "
+            "'next thursday' → pass 'next thursday'; "
+            "'tomorrow morning' → pass 'tomorrow morning'. "
+            "The system resolves the phrase automatically."
         ),
     }
     return [system_msg] + non_system[-settings.tool_router_context_messages:]
