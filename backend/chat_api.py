@@ -366,7 +366,7 @@ _LIST_TOOLS = [
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Short reminder title"},
-                    "due_date": {"type": "string", "description": "ISO 8601 datetime when the reminder fires (e.g. 2025-05-01T09:00:00)"},
+                    "due_date": {"type": "string", "description": "When the reminder fires — natural language ('tomorrow', 'next Monday', 'in 2 hours') or ISO 8601 datetime"},
                     "content": {"type": "string", "description": "Optional body text for the reminder"},
                 },
                 "required": ["title", "due_date"],
@@ -488,7 +488,7 @@ _ROUTER_TOOLS = [
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Short reminder title"},
-                    "due_date": {"type": "string", "description": "ISO 8601 datetime when the reminder fires (e.g. 2025-05-01T09:00:00)"},
+                    "due_date": {"type": "string", "description": "When the reminder fires — natural language ('tomorrow', 'next Monday', 'in 2 hours') or ISO 8601 datetime"},
                     "content": {"type": "string", "description": "Optional body text for the reminder"},
                 },
                 "required": ["title", "due_date"],
@@ -510,6 +510,18 @@ _ROUTER_TOOLS = [
         },
     },
 ]
+
+
+def resolve_due_date(raw: str) -> str:
+    """Convert natural language or ISO date to ISO datetime string."""
+    import dateparser
+    parsed = dateparser.parse(raw, settings={
+        "PREFER_DATES_FROM": "future",
+        "RELATIVE_BASE": datetime.now(),
+    })
+    if parsed:
+        return parsed.strftime("%Y-%m-%dT%H:%M:%S")
+    return raw
 
 
 async def _check_list_access(conn: aiosqlite.Connection, note_id: str,
@@ -806,7 +818,8 @@ async def _execute_tool(name: str, arguments: dict, user_id: str | None) -> str:
         if not user_id:
             return json.dumps({"error": "No user context"})
         return await _tool_create_reminder(
-            arguments.get("title", ""), arguments.get("due_date", ""),
+            arguments.get("title", ""),
+            resolve_due_date(arguments.get("due_date", "")),
             arguments.get("content", ""), user_id,
         )
     if name == "create_journal_entry":
@@ -893,7 +906,8 @@ async def _execute_router_tool(name: str, arguments: dict, user_id: str | None) 
         return await _tool_create_note(arguments.get("content"), user_id)
     if name == "create_reminder":
         return await _tool_create_reminder(
-            arguments.get("title", ""), arguments.get("due_date", ""),
+            arguments.get("title", ""),
+            resolve_due_date(arguments.get("due_date", "")),
             arguments.get("content", ""), user_id,
         )
     if name == "create_journal_entry":
@@ -934,17 +948,15 @@ async def _log_router_interaction(
 
 
 def _build_router_messages(original: list[dict]) -> list[dict]:
-    from datetime import timedelta
     non_system = [m for m in original if m.get("role") != "system"]
     now = datetime.now(timezone.utc)
-    time_str = now.strftime("%H:%M UTC")
-    days = [now + timedelta(days=i) for i in range(8)]
-    day_list = ", ".join(d.strftime("%A %B %-d") for d in days)
+    now_str = now.strftime("%A, %B %-d %Y, %H:%M UTC")
     system_msg = {
         "role": "system",
         "content": (
-            f"Current date and time: {days[0].strftime('%A, %B %-d %Y')}, {time_str}. "
-            f"Upcoming dates: {day_list}."
+            f"Current date and time: {now_str}. "
+            "For due_date, pass the user's exact phrasing (e.g. 'tomorrow', 'next Monday', 'in 2 hours') — "
+            "the system will resolve it to an exact date automatically."
         ),
     }
     return [system_msg] + non_system[-settings.tool_router_context_messages:]
