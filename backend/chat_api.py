@@ -889,6 +889,15 @@ async def _execute_router_tool(name: str, arguments: dict, user_id: str | None) 
 
     if name == "create_list":
         return await _tool_create_list(arguments.get("title", ""), user_id, arguments.get("item_id"))
+    if name == "create_note":
+        return await _tool_create_note(arguments.get("content"), user_id)
+    if name == "create_reminder":
+        return await _tool_create_reminder(
+            arguments.get("title", ""), arguments.get("due_date", ""),
+            arguments.get("content", ""), user_id,
+        )
+    if name == "create_journal_entry":
+        return await _tool_create_journal_entry(arguments.get("content"), user_id)
 
     return json.dumps({"error": f"Unknown tool: {name}"})
 
