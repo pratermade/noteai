@@ -934,9 +934,20 @@ async def _log_router_interaction(
 
 
 def _build_router_messages(original: list[dict]) -> list[dict]:
+    from datetime import timedelta
     non_system = [m for m in original if m.get("role") != "system"]
-    today = datetime.now().strftime("%Y-%m-%d")
-    system_msg = {"role": "system", "content": f"Today's date is {today}."}
+    now = datetime.now(timezone.utc)
+    tomorrow = now + timedelta(days=1)
+    today_str    = now.strftime("%A, %B %-d %Y")
+    tomorrow_str = tomorrow.strftime("%A, %B %-d %Y")
+    time_str     = now.strftime("%H:%M UTC")
+    system_msg = {
+        "role": "system",
+        "content": (
+            f"Current date and time: {today_str}, {time_str}. "
+            f"Tomorrow is {tomorrow_str}."
+        ),
+    }
     return [system_msg] + non_system[-settings.tool_router_context_messages:]
 
 
