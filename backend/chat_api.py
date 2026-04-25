@@ -529,6 +529,23 @@ def resolve_due_date(raw: str) -> str:
     return raw
 
 
+def _extract_date_from_user_message(text: str) -> str | None:
+    """Extract and resolve the first date/time phrase found in a user message.
+
+    Used to override unreliable model-generated due_date values.
+    """
+    import dateparser.search
+    dp_settings = {"PREFER_DATES_FROM": "future", "RELATIVE_BASE": datetime.now()}
+    try:
+        results = dateparser.search.search_dates(text, languages=["en"], settings=dp_settings)
+        if results:
+            _phrase, parsed_dt = results[0]
+            return parsed_dt.strftime("%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        pass
+    return None
+
+
 async def _check_list_access(conn: aiosqlite.Connection, note_id: str,
                               user_id: str) -> bool:
     async with conn.execute(
@@ -1076,6 +1093,16 @@ async def _run_tool_router(
             except (KeyError, json.JSONDecodeError) as exc:
                 logger.warning("Tool router bad tool call: %s, falling back", exc)
                 return None
+            # For create_reminder, override due_date by extracting directly from the
+            # user's message — the router model often computes wrong date phrases.
+            if fn_name == "create_reminder":
+                last_user = next(
+                    (m["content"] for m in reversed(router_msgs) if m.get("role") == "user"),
+                    "",
+                )
+                extracted = _extract_date_from_user_message(last_user)
+                if extracted:
+                    fn_args["due_date"] = extracted
             logger.info("Router [round %d]: %s args=%s user=%s", _round + 1, fn_name, fn_args, user_id)
             result = await _execute_router_tool(fn_name, fn_args, user_id)
             round_entry["tool_calls"].append({"name": fn_name, "arguments": fn_args})
