@@ -985,7 +985,10 @@ def _build_router_messages(original: list[dict]) -> list[dict]:
             "The system resolves the phrase automatically."
         ),
     }
-    return [system_msg] + non_system[-settings.tool_router_context_messages:]
+    # Send only user messages — assistant responses saying "I've done X" would
+    # mislead the router into skipping tools for follow-up requests.
+    user_msgs = [m for m in non_system if m.get("role") == "user"]
+    return [system_msg] + user_msgs[-settings.tool_router_context_messages:]
 
 
 def _parse_xml_tool_calls(content: str) -> list[dict] | None:
