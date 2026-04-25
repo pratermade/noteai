@@ -937,15 +937,14 @@ def _build_router_messages(original: list[dict]) -> list[dict]:
     from datetime import timedelta
     non_system = [m for m in original if m.get("role") != "system"]
     now = datetime.now(timezone.utc)
-    tomorrow = now + timedelta(days=1)
-    today_str    = now.strftime("%A, %B %-d %Y")
-    tomorrow_str = tomorrow.strftime("%A, %B %-d %Y")
-    time_str     = now.strftime("%H:%M UTC")
+    time_str = now.strftime("%H:%M UTC")
+    days = [now + timedelta(days=i) for i in range(8)]
+    day_list = ", ".join(d.strftime("%A %B %-d") for d in days)
     system_msg = {
         "role": "system",
         "content": (
-            f"Current date and time: {today_str}, {time_str}. "
-            f"Tomorrow is {tomorrow_str}."
+            f"Current date and time: {days[0].strftime('%A, %B %-d %Y')}, {time_str}. "
+            f"Upcoming dates: {day_list}."
         ),
     }
     return [system_msg] + non_system[-settings.tool_router_context_messages:]
