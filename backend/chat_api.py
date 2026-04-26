@@ -420,6 +420,23 @@ def _is_note_create_request(msg: str) -> str | None:
     return None
 
 
+def _set_pending_note_intent(user_id: str, intent: str) -> str:
+    """Set pending intent and return the follow-up question."""
+    q = "What would you like to journal?" if intent == "journal" else "What should the note say?"
+    _pending_intent[user_id] = {"intent": intent, "expires": time.time() + 300}
+    return q
+
+
+def _make_text_response(text: str, model: str = "") -> dict:
+    """Build a minimal OpenAI-format chat completion response."""
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion",
+        "model": model or "noterai-rag",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+    }
+
+
 _ROUTER_TOOLS = [
     {
         "type": "function",
@@ -1126,13 +1143,22 @@ async def _run_tool_router(
             else:
                 return raw_messages + accumulated, rounds_log
 
-        # Validate before executing — skip round if any list tool has a vague note_id
+        # Validate before executing
         for _tc in tool_calls:
             try:
                 _fn = _tc["function"]["name"]
                 _args = json.loads(_tc["function"].get("arguments", "{}"))
             except (KeyError, json.JSONDecodeError):
                 continue
+            # Creation tool with no content — set pending intent, let orchestrator ask
+            if _fn in ("create_note", "create_journal_entry"):
+                if not (_args.get("content") or "").strip():
+                    if user_id:
+                        intent = "journal" if _fn == "create_journal_entry" else "note"
+                        _set_pending_note_intent(user_id, intent)
+                        logger.info("Router [round %d]: %s called with no content — pending intent set", _round + 1, _fn)
+                    return raw_messages + accumulated, rounds_log
+            # List tool with vague note_id — skip
             if _fn in _LIST_TOOL_NAMES:
                 raw_nid = _args.get("note_id", "").strip().lower()
                 if not raw_nid or raw_nid in _VAGUE_NOTE_REFS or raw_nid.startswith("the "):
@@ -1160,15 +1186,6 @@ async def _run_tool_router(
                     fn_args["due_date"] = extracted
             logger.info("Router [round %d]: %s args=%s user=%s", _round + 1, fn_name, fn_args, user_id)
             result = await _execute_router_tool(fn_name, fn_args, user_id)
-            if user_id:
-                try:
-                    if "needs_input" in json.loads(result):
-                        _pending_intent[user_id] = {
-                            "intent": "journal" if fn_name == "create_journal_entry" else "note",
-                            "expires": time.time() + 300,
-                        }
-                except Exception:
-                    pass
             round_entry["tool_calls"].append({"name": fn_name, "arguments": fn_args})
             round_entry["tool_results"].append(result)
             accumulated.append({
@@ -1320,10 +1337,25 @@ async def chat_completions(body: ChatRequest):
             if router_result is not None:
                 augmented, _stream_rounds_log = router_result
                 _stream_router_msgs = _build_router_messages(_stream_raw)
-                if not _stream_rounds_log and _stream_last_user:
-                    intent = _is_note_create_request(_stream_last_user)
-                    if intent:
-                        _pending_intent[body.user_id] = {"intent": intent, "expires": time.time() + 300}
+                if not _stream_rounds_log and body.user_id:
+                    if _stream_last_user and body.user_id not in _pending_intent:
+                        intent = _is_note_create_request(_stream_last_user)
+                        if intent:
+                            _set_pending_note_intent(body.user_id, intent)
+                    _spi = _pending_intent.get(body.user_id)
+                    if _spi and time.time() < _spi["expires"]:
+                        _q = "What would you like to journal?" if _spi["intent"] == "journal" else "What should the note say?"
+
+                        async def _ask_stream(_q=_q):
+                            chunk = json.dumps({
+                                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                                "object": "chat.completion.chunk",
+                                "choices": [{"index": 0, "delta": {"role": "assistant", "content": _q}, "finish_reason": None}],
+                            })
+                            yield f"data: {chunk}\n\n".encode()
+                            yield b"data: [DONE]\n\n"
+
+                        return StreamingResponse(_ask_stream(), media_type="text/event-stream")
                 payload["messages"] = _build_messages(augmented, context, reminders_text, character_prompt)
 
         async def _stream():
@@ -1398,11 +1430,17 @@ async def chat_completions(body: ChatRequest):
         router_result = await _run_tool_router(raw_messages, body.user_id)
         if router_result is not None:
             augmented, rounds_log = router_result
-            # If router made no tool calls, detect note/journal intent and set pending
-            if not rounds_log and body.user_id and last_user_content:
-                intent = _is_note_create_request(last_user_content)
-                if intent:
-                    _pending_intent[body.user_id] = {"intent": intent, "expires": time.time() + 300}
+            if not rounds_log and body.user_id:
+                # Pattern-check sets pending if router made zero calls for note/journal request
+                if last_user_content and body.user_id not in _pending_intent:
+                    intent = _is_note_create_request(last_user_content)
+                    if intent:
+                        _set_pending_note_intent(body.user_id, intent)
+                # If pending intent exists (set here or by router validation), return question
+                pi = _pending_intent.get(body.user_id)
+                if pi and time.time() < pi["expires"]:
+                    q = "What would you like to journal?" if pi["intent"] == "journal" else "What should the note say?"
+                    return JSONResponse(content=_make_text_response(q))
             payload["messages"] = _build_messages(augmented, context, reminders_text, character_prompt)
             resp = await client.post(_llm_url(), json=payload, headers=_headers())
             data = resp.json()
