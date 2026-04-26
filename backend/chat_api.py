@@ -841,9 +841,23 @@ async def _tool_create_journal_entry(content: str | None, user_id: str) -> str:
     if not content or not content.strip():
         return json.dumps({"needs_input": "content", "prompt": "What would you like to journal?"})
     try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
         now_dt = datetime.now(timezone.utc)
+        # Convert to user's local timezone for display
+        try:
+            async with aiosqlite.connect(settings.database_url) as _tz_conn:
+                async with _tz_conn.execute(
+                    "SELECT value FROM user_settings WHERE user_id = ? AND key = 'server_timezone'",
+                    (user_id,),
+                ) as _cur:
+                    _row = await _cur.fetchone()
+                    tz_name = _row[0] if _row else ""
+            local_dt = now_dt.astimezone(ZoneInfo(tz_name)) if tz_name else now_dt
+        except (ZoneInfoNotFoundError, Exception):
+            local_dt = now_dt
         now = now_dt.isoformat()
-        title = now_dt.strftime("Journal — %B %-d, %Y")
+        title = local_dt.strftime("Journal — %B %-d, %Y")
+        time_stamp = local_dt.strftime("%-I:%M %p")
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
@@ -855,9 +869,10 @@ async def _tool_create_journal_entry(content: str | None, user_id: str) -> str:
                 (user_id, title),
             ) as cur:
                 existing = await cur.fetchone()
+            stamped = f"**{time_stamp}**\n\n{content.strip()}"
             if existing:
                 note_id = existing["id"]
-                merged = existing["content"] + "\n\n---\n\n" + content.strip()
+                merged = existing["content"] + "\n\n---\n\n" + stamped
                 await conn.execute(
                     "UPDATE notes SET content = ?, updated_at = ? WHERE id = ?",
                     (merged, now, note_id),
@@ -872,10 +887,10 @@ async def _tool_create_journal_entry(content: str | None, user_id: str) -> str:
                 "INSERT INTO notes"
                 " (id, user_id, title, content, tags, folder, created_at, updated_at, note_type)"
                 " VALUES (?,?,?,?,?,?,?,?,?)",
-                (note_id, user_id, title, content, "[]", "Journal", now, now, "markdown"),
+                (note_id, user_id, title, stamped, "[]", "Journal", now, now, "markdown"),
             )
             await conn.commit()
-        await _index_note_inline(note_id, title, content, user_id, "Journal")
+        await _index_note_inline(note_id, title, stamped, user_id, "Journal")
         return json.dumps({"note_id": note_id, "title": title})
     except Exception as exc:
         logger.error("_tool_create_journal_entry failed: %s", exc, exc_info=True)
