@@ -30,9 +30,10 @@ from . import database as db
 from . import embeddings, vector_store, wyoming_client
 from .chunker import chunk_text
 from .models import (
-    AttachmentResponse, ChangePasswordRequest, FOLDERS, LoginRequest, NoteCreate,
-    NoteResponse, NoteUpdate, ReindexJob, SearchRequest, SearchResult, SettingsPatch,
-    SettingsResponse, TokenResponse, UserResponse,
+    AttachmentResponse, ChangePasswordRequest, FOLDERS, ListItemCreate, ListItemResponse,
+    ListItemUpdate, LoginRequest, NoteCreate, NoteResponse, NoteShareResponse, NoteUpdate,
+    ReindexJob, SearchRequest, SearchResult, SettingsPatch, SettingsResponse,
+    TokenResponse, UserResponse,
 )
 from .pdf_extractor import ExtractionError as PDFExtractionError, extract as pdf_extract
 from .web_extractor import ExtractionError as WebExtractionError, extract_url, get_youtube_video_id
@@ -504,6 +505,12 @@ async def me(current_user: CurrentUser):
     return UserResponse(**current_user)
 
 
+@app.get("/api/users")
+async def list_users(conn: DB, current_user: CurrentUser):
+    users = await db.list_users(conn)
+    return [{"id": u["id"], "username": u["username"]} for u in users]
+
+
 @app.post("/api/auth/change-password", status_code=204)
 async def change_password(body: ChangePasswordRequest, current_user: CurrentUser, conn: DB):
     user = await db.get_user_by_username(conn, current_user["username"])
@@ -543,8 +550,11 @@ async def get_note(note_id: str, conn: DB, current_user: CurrentUser):
 async def create_note(body: NoteCreate, conn: DB, background_tasks: BackgroundTasks,
                       current_user: CurrentUser):
     note = await db.create_note(conn, current_user["id"], body.title, body.content,
-                                body.tags, body.folder, reminder_at=body.reminder_at)
-    if note.folder == "Journal":
+                                body.tags, body.folder, note_type=body.note_type,
+                                reminder_at=body.reminder_at)
+    if body.note_type == "list":
+        await db.set_note_indexed(conn, note.id)
+    elif note.folder == "Journal":
         background_tasks.add_task(_journal_pipeline, note.id, current_user["id"])
     else:
         background_tasks.add_task(
@@ -562,19 +572,24 @@ async def update_note(note_id: str, body: NoteUpdate, conn: DB,
         raise HTTPException(status_code=404, detail="Note not found")
     raw = body.model_dump(exclude_unset=True)
     fields = {k: v for k, v in raw.items() if v is not None or k == "reminder_at"}
-    note = await db.update_note(conn, note_id, user_id=current_user["id"], **fields)
-    await db.clear_note_indexed(conn, note_id)
-    try:
-        await vector_store.delete_by_note_id(note_id)
-    except Exception as exc:
-        logger.warning("Could not delete old vectors for note %s: %s", note_id, exc)
-    if note.folder == "Journal":
-        background_tasks.add_task(_journal_pipeline, note.id, current_user["id"])
+    # For list notes, access already verified via get_note (supports shared); skip user_id filter
+    update_uid = None if existing.note_type == "list" else current_user["id"]
+    note = await db.update_note(conn, note_id, user_id=update_uid, **fields)
+    if note.note_type == "list":
+        await db.set_note_indexed(conn, note_id)
     else:
-        background_tasks.add_task(
-            _index_note, note.id, note.title, note.content, note.tags, note.folder,
-            current_user["id"]
-        )
+        await db.clear_note_indexed(conn, note_id)
+        try:
+            await vector_store.delete_by_note_id(note_id)
+        except Exception as exc:
+            logger.warning("Could not delete old vectors for note %s: %s", note_id, exc)
+        if note.folder == "Journal":
+            background_tasks.add_task(_journal_pipeline, note.id, current_user["id"])
+        else:
+            background_tasks.add_task(
+                _index_note, note.id, note.title, note.content, note.tags, note.folder,
+                current_user["id"]
+            )
     return note
 
 
@@ -712,6 +727,104 @@ async def search(body: SearchRequest, conn: DB, current_user: CurrentUser):
 
     results.sort(key=lambda r: r.score, reverse=True)
     return results
+
+
+# ---------------------------------------------------------------------------
+# List items
+# ---------------------------------------------------------------------------
+
+async def _require_note_access(conn: aiosqlite.Connection, note_id: str,
+                                user_id: str) -> NoteResponse:
+    note = await db.get_note(conn, note_id, user_id=user_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if note.note_type != "list":
+        raise HTTPException(status_code=400, detail="Note is not a list")
+    return note
+
+
+@app.get("/api/notes/{note_id}/items", response_model=list[ListItemResponse])
+async def get_list_items(note_id: str, conn: DB, current_user: CurrentUser):
+    await _require_note_access(conn, note_id, current_user["id"])
+    return await db.get_list_items(conn, note_id)
+
+
+@app.post("/api/notes/{note_id}/items", response_model=ListItemResponse, status_code=201)
+async def create_list_item(note_id: str, body: ListItemCreate, conn: DB,
+                            current_user: CurrentUser):
+    await _require_note_access(conn, note_id, current_user["id"])
+    return await db.create_list_item(conn, note_id, body.content, body.position)
+
+
+@app.put("/api/notes/{note_id}/items/{item_id}", response_model=ListItemResponse)
+async def update_list_item(note_id: str, item_id: str, body: ListItemUpdate,
+                            conn: DB, current_user: CurrentUser):
+    await _require_note_access(conn, note_id, current_user["id"])
+    fields = body.model_dump(exclude_unset=True)
+    item = await db.update_list_item(conn, item_id, note_id, **fields)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return item
+
+
+@app.delete("/api/notes/{note_id}/items/{item_id}", status_code=204)
+async def delete_list_item(note_id: str, item_id: str, conn: DB,
+                            current_user: CurrentUser):
+    await _require_note_access(conn, note_id, current_user["id"])
+    deleted = await db.delete_list_item(conn, item_id, note_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+
+# ---------------------------------------------------------------------------
+# Note sharing
+# ---------------------------------------------------------------------------
+
+async def _require_note_owner(conn: aiosqlite.Connection, note_id: str,
+                               user_id: str) -> NoteResponse:
+    note = await db.get_note(conn, note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if note.note_type != "list":
+        raise HTTPException(status_code=400, detail="Only list notes can be shared")
+    # Check ownership directly (not via share)
+    async with conn.execute("SELECT id FROM notes WHERE id = ? AND user_id = ?",
+                            (note_id, user_id)) as cur:
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=403, detail="Only the note owner can manage sharing")
+    return note
+
+
+@app.get("/api/notes/{note_id}/shares", response_model=list[NoteShareResponse])
+async def get_note_shares(note_id: str, conn: DB, current_user: CurrentUser):
+    note = await db.get_note(conn, note_id, user_id=current_user["id"])
+    if not note or note.note_type != "list":
+        raise HTTPException(status_code=404, detail="Note not found")
+    return await db.list_note_shares(conn, note_id)
+
+
+@app.post("/api/notes/{note_id}/shares/{user_id}", response_model=NoteShareResponse,
+          status_code=201)
+async def share_note(note_id: str, user_id: str, conn: DB, current_user: CurrentUser):
+    await _require_note_owner(conn, note_id, current_user["id"])
+    if user_id == current_user["id"]:
+        raise HTTPException(status_code=400, detail="Cannot share a note with yourself")
+    target = await db.get_user_by_id(conn, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    share = await db.create_note_share(conn, note_id, user_id)
+    if not share:
+        raise HTTPException(status_code=409, detail="Already shared with this user")
+    return share
+
+
+@app.delete("/api/notes/{note_id}/shares/{user_id}", status_code=204)
+async def unshare_note(note_id: str, user_id: str, conn: DB, current_user: CurrentUser):
+    await _require_note_owner(conn, note_id, current_user["id"])
+    deleted = await db.delete_note_share(conn, note_id, user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Share not found")
 
 
 # ---------------------------------------------------------------------------
@@ -976,13 +1089,23 @@ async def _build_settings_response(conn, user_id: str) -> SettingsResponse:
 
     times = await _read_reminder_times(conn, user_id)
 
-    allowed_raw = await _get_g("telegram_allowed_users", "TELEGRAM_ALLOWED_USERS", "")
+    async def _get_tg(key: str, env_key: str = "", default: str = "") -> str:
+        """Per-user Telegram setting, falling back to legacy global then env."""
+        val = await db.get_user_setting(conn, user_id, key)
+        if val is not None:
+            return val
+        val = await db.get_setting(conn, key)  # legacy global migration fallback
+        if val is not None:
+            return val
+        return os.environ.get(env_key, default) if env_key else default
+
+    allowed_raw = await _get_tg("telegram_allowed_users", "TELEGRAM_ALLOWED_USERS", "")
     allowed = [int(u.strip()) for u in allowed_raw.split(",") if u.strip()]
 
-    chat_id_raw = await _get_g("telegram_reminder_chat_id", "TELEGRAM_REMINDER_CHAT_ID", "0")
+    chat_id_raw = await _get_tg("telegram_reminder_chat_id", "TELEGRAM_REMINDER_CHAT_ID", "0")
     chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
 
-    max_hist_raw = await _get_g("telegram_max_history", "TELEGRAM_MAX_HISTORY", "20")
+    max_hist_raw = await _get_tg("telegram_max_history", "TELEGRAM_MAX_HISTORY", "20")
     max_hist = int(max_hist_raw) if max_hist_raw.strip() else 20
 
     journal_raw = await db.get_user_setting(conn, user_id, "journal_reminder_times")
@@ -994,13 +1117,15 @@ async def _build_settings_response(conn, user_id: str) -> SettingsResponse:
         server_timezone=tz,
         reminder_times=times,
         journal_reminder_times=journal_times,
-        telegram_bot_token=await _get_g("telegram_bot_token", "TELEGRAM_BOT_TOKEN", ""),
+        telegram_bot_token=await _get_tg("telegram_bot_token", "TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_users=allowed,
         telegram_reminder_chat_id=chat_id,
-        telegram_rag_url=await _get_g("telegram_rag_url", "TELEGRAM_RAG_URL", "http://localhost:8084"),
-        telegram_rag_model=await _get_g("telegram_rag_model", "TELEGRAM_RAG_MODEL", "noterai-rag"),
+        telegram_rag_url=await _get_tg("telegram_rag_url", "TELEGRAM_RAG_URL", "http://localhost:8084"),
+        telegram_rag_model=await _get_tg("telegram_rag_model", "TELEGRAM_RAG_MODEL", "noterai-rag"),
         telegram_max_history=max_hist,
         character_prompt=await _get_u("character_prompt"),
+        telegram_bot_user_id=await _get_g("bot_user_id"),
+        telegram_user_id=await _get_tg("telegram_user_id"),
     )
 
 
@@ -1034,28 +1159,37 @@ async def update_settings(body: SettingsPatch, conn: DB, current_user: CurrentUs
                                   ",".join(body.journal_reminder_times))
     if body.character_prompt is not None:
         await db.set_user_setting(conn, uid, "character_prompt", body.character_prompt)
-    # Global settings (Telegram)
+    # Per-user Telegram settings
     if body.telegram_bot_token is not None:
-        await db.set_setting(conn, "telegram_bot_token", body.telegram_bot_token)
+        await db.set_user_setting(conn, uid, "telegram_bot_token", body.telegram_bot_token)
     if body.telegram_allowed_users is not None:
-        await db.set_setting(conn, "telegram_allowed_users",
-                             ",".join(str(u) for u in body.telegram_allowed_users))
+        await db.set_user_setting(conn, uid, "telegram_allowed_users",
+                                  ",".join(str(u) for u in body.telegram_allowed_users))
     if body.telegram_reminder_chat_id is not None:
-        await db.set_setting(conn, "telegram_reminder_chat_id",
-                             str(body.telegram_reminder_chat_id))
+        await db.set_user_setting(conn, uid, "telegram_reminder_chat_id",
+                                  str(body.telegram_reminder_chat_id))
     if body.telegram_rag_url is not None:
-        await db.set_setting(conn, "telegram_rag_url", body.telegram_rag_url)
+        await db.set_user_setting(conn, uid, "telegram_rag_url", body.telegram_rag_url)
     if body.telegram_rag_model is not None:
-        await db.set_setting(conn, "telegram_rag_model", body.telegram_rag_model)
+        await db.set_user_setting(conn, uid, "telegram_rag_model", body.telegram_rag_model)
     if body.telegram_max_history is not None:
-        await db.set_setting(conn, "telegram_max_history", str(body.telegram_max_history))
+        await db.set_user_setting(conn, uid, "telegram_max_history",
+                                  str(body.telegram_max_history))
+    if body.telegram_bot_user_id is not None:
+        user = await db.get_user_by_id(conn, body.telegram_bot_user_id)
+        if not user:
+            raise HTTPException(status_code=422, detail="telegram_bot_user_id: user not found")
+        await db.set_setting(conn, "bot_user_id", body.telegram_bot_user_id)
+    if body.telegram_user_id is not None:
+        await db.set_user_setting(conn, uid, "telegram_user_id", body.telegram_user_id)
     return await _build_settings_response(conn, uid)
 
 
 @app.post("/api/settings/test-telegram")
 async def test_telegram(conn: DB, current_user: CurrentUser):
-    token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
+    uid = current_user["id"]
+    token = await db.get_user_setting(conn, uid, "telegram_bot_token") or await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id_raw = await db.get_user_setting(conn, uid, "telegram_reminder_chat_id") or await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
     chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
 
     if not token:
@@ -1078,8 +1212,9 @@ async def test_telegram(conn: DB, current_user: CurrentUser):
 
 @app.post("/api/settings/test-task-reminder")
 async def test_task_reminder(conn: DB, current_user: CurrentUser):
-    token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
+    uid = current_user["id"]
+    token = await db.get_user_setting(conn, uid, "telegram_bot_token") or await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id_raw = await db.get_user_setting(conn, uid, "telegram_reminder_chat_id") or await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
     chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
 
     if not token:
@@ -1152,8 +1287,9 @@ async def test_task_reminder(conn: DB, current_user: CurrentUser):
 
 @app.post("/api/settings/test-journal-reminder")
 async def test_journal_reminder(conn: DB, current_user: CurrentUser):
-    token = await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id_raw = await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
+    uid = current_user["id"]
+    token = await db.get_user_setting(conn, uid, "telegram_bot_token") or await db.get_setting(conn, "telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id_raw = await db.get_user_setting(conn, uid, "telegram_reminder_chat_id") or await db.get_setting(conn, "telegram_reminder_chat_id") or os.environ.get("TELEGRAM_REMINDER_CHAT_ID", "0")
     chat_id = int(chat_id_raw) if chat_id_raw.strip() else 0
 
     if not token:

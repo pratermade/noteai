@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 
@@ -15,6 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from . import embeddings, vector_store
+from .chunker import chunk_text
 from .config import settings
 from .models import FOLDERS
 
@@ -78,6 +81,16 @@ def _headers() -> dict:
     if settings.summary_api_key:
         h["Authorization"] = f"Bearer {settings.summary_api_key}"
     return h
+
+
+def _router_url() -> str | None:
+    if not settings.tool_router_base_url:
+        return None
+    return f"{settings.tool_router_base_url.rstrip('/')}/v1/chat/completions"
+
+
+def _router_headers() -> dict:
+    return {"Content-Type": "application/json"}
 
 
 async def _get_due_reminders(user_id: str | None = None) -> tuple[str, list[dict]]:
@@ -156,10 +169,6 @@ _CLASSIFY_SYSTEM = (
     "- 'what should I work on / tasks / action items' → [\"Todo\"]\n"
     "- 'how did I feel / past experiences / last week' → [\"Journal\"]\n"
     "- 'how does X work / what is X / specs / facts' → [\"Reference\"]\n"
-    "- 'my projects / project status' → [\"Project\"]\n"
-    "- 'ideas / brainstorm' → [\"Ideas\"]\n"
-    "- 'things to read / links to revisit' → [\"Review Later\"]\n"
-    "- 'tools / templates / assets' → [\"Resources\"]\n"
     "- 'archived / old notes / past projects' → [\"Archive\"]\n"
     "- General or cross-cutting questions → []\n\n"
     "Respond with ONLY a valid JSON array, nothing else."
@@ -256,6 +265,1019 @@ def _format_sources_md(sources: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# List management tools (OpenAI function-calling format)
+# ---------------------------------------------------------------------------
+
+_LIST_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_list_items",
+            "description": "Get all items in a specific list note.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "The list note ID"},
+                },
+                "required": ["note_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_list_item",
+            "description": "Add a new item to a list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "The list note ID"},
+                    "content": {"type": "string", "description": "Text of the new item"},
+                },
+                "required": ["note_id", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_list_item",
+            "description": "Mark a list item as complete.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "The list note ID"},
+                    "item_id": {"type": "string", "description": "The item ID to mark complete"},
+                },
+                "required": ["note_id", "item_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_list_item",
+            "description": "Remove an item from a list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "The list note ID"},
+                    "item_id": {"type": "string", "description": "The item ID to delete"},
+                },
+                "required": ["note_id", "item_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_list",
+            "description": "Create a new list note.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Name for the new list"},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_note",
+            "description": "Create a new markdown note. Use when the user wants to save information, thoughts, or reference material.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Note body in markdown"},
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_reminder",
+            "description": "Create a reminder that fires at a specific date/time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short reminder title"},
+                    "due_date": {"type": "string", "description": "When the reminder fires — natural language ('tomorrow', 'next Monday', 'in 2 hours') or ISO 8601 datetime"},
+                    "content": {"type": "string", "description": "Optional body text for the reminder"},
+                },
+                "required": ["title", "due_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_journal_entry",
+            "description": "Create a journal entry in the Journal folder.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Journal entry body in markdown"},
+                },
+                "required": ["content"],
+            },
+        },
+    },
+]
+
+
+_LIST_TOOL_NAMES = {"get_list_items", "add_list_item", "complete_list_item", "delete_list_item"}
+_VAGUE_NOTE_REFS = {"it", "that", "this", "the", "them", "those", "note", "list", "one", "here"}
+
+# Pending note/journal intent: set when creation attempted without content,
+# consumed on the next user message to bypass the router entirely.
+_pending_intent: dict[str, dict] = {}  # {user_id: {"intent": str, "expires": float}}
+
+_NOTE_CREATE_RE = re.compile(
+    r'\b(take|make|write|create|add|new|record|jot)(\s+a)?\s+(?:note|jot)\b'
+    r'|^note\s+(this|that|for\s+me)$',
+    re.I,
+)
+_JOURNAL_CREATE_RE = re.compile(
+    r'\b(take|make|write|create|add|new|record)(\s+a(?:nother)?)?\s+journal\b'
+    r'|\bdiary\s+entry\b'
+    r'|\bjournal\s+entry\b'
+    r'|^journal\s*(for\s+me|please|today)?\s*$',
+    re.I,
+)
+
+
+def _is_note_create_request(msg: str) -> str | None:
+    """Return 'note' or 'journal' if msg is a pure creation request (no inline content)."""
+    msg = msg.strip()
+    if len(msg) > 80 or re.search(r'[,;:—]', msg):
+        return None
+    if _JOURNAL_CREATE_RE.search(msg):
+        return "journal"
+    if _NOTE_CREATE_RE.search(msg):
+        return "note"
+    return None
+
+
+def _set_pending_note_intent(user_id: str, intent: str) -> str:
+    """Set pending intent and return the follow-up question."""
+    q = "What would you like to journal?" if intent == "journal" else "What should the note say?"
+    _pending_intent[user_id] = {"intent": intent, "expires": time.time() + 300}
+    return q
+
+
+def _make_text_response(text: str, model: str = "") -> dict:
+    """Build a minimal OpenAI-format chat completion response."""
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion",
+        "model": model or "noterai-rag",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+    }
+
+
+_ROUTER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "add_list_item",
+            "description": "Add an item to an existing list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "The list to add the item to (e.g. grocery, shopping, todo, chores)"},
+                    "content": {"type": "string", "description": "The item to add to the list"},
+                },
+                "required": ["note_id", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_list_items",
+            "description": "Retrieve all items from a list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "The list to retrieve items from"},
+                },
+                "required": ["note_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_list_item",
+            "description": "Mark an item on a list as complete/done.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "The list the item is on"},
+                    "item_id": {"type": "string", "description": "The item to mark as complete (matched via fuzzy search)"},
+                },
+                "required": ["note_id", "item_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_list_item",
+            "description": "Remove an item from a list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "The list to remove the item from"},
+                    "item_id": {"type": "string", "description": "The item to remove (matched via fuzzy search)"},
+                },
+                "required": ["note_id", "item_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_list",
+            "description": "Create a new list, optionally with an initial item.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "The name of the new list"},
+                    "item_id": {"type": "string", "description": "Optional initial item to add to the list"},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_note",
+            "description": "Create a new markdown note to save information or thoughts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Note body in markdown"},
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_reminder",
+            "description": "Create a reminder that fires at a specific date/time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short reminder title"},
+                    "due_date": {"type": "string", "description": "When the reminder fires — natural language ('tomorrow', 'next Monday', 'in 2 hours') or ISO 8601 datetime"},
+                    "content": {"type": "string", "description": "Optional body text for the reminder"},
+                },
+                "required": ["title", "due_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_journal_entry",
+            "description": "Create a journal entry in the Journal folder.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Journal entry body in markdown"},
+                },
+                "required": ["content"],
+            },
+        },
+    },
+]
+
+
+def resolve_due_date(raw: str) -> str:
+    """Convert natural language or ISO date to ISO datetime string."""
+    import dateparser
+    dp_settings = {"PREFER_DATES_FROM": "future", "RELATIVE_BASE": datetime.now()}
+    try:
+        parsed = dateparser.parse(raw, languages=["en"], settings=dp_settings)
+        if parsed is None:
+            stripped = re.sub(r"^(next|this|on|by)\s+", "", raw.strip(), flags=re.I)
+            if stripped != raw.strip():
+                parsed = dateparser.parse(stripped, languages=["en"], settings=dp_settings)
+        if parsed:
+            return parsed.strftime("%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        pass
+    return raw
+
+
+def _extract_date_from_user_message(text: str) -> str | None:
+    """Extract and resolve the first date/time phrase found in a user message.
+
+    Used to override unreliable model-generated due_date values.
+    """
+    import dateparser.search
+    dp_settings = {"PREFER_DATES_FROM": "future", "RELATIVE_BASE": datetime.now()}
+    try:
+        results = dateparser.search.search_dates(text, languages=["en"], settings=dp_settings)
+        if results:
+            _phrase, parsed_dt = results[0]
+            return parsed_dt.strftime("%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        pass
+    return None
+
+
+async def _check_list_access(conn: aiosqlite.Connection, note_id: str,
+                              user_id: str) -> bool:
+    async with conn.execute(
+        "SELECT id FROM notes WHERE id = ? AND note_type = 'list' AND ("
+        "  user_id = ? OR id IN (SELECT note_id FROM note_shares WHERE shared_with_user_id = ?)"
+        ")",
+        (note_id, user_id, user_id),
+    ) as cur:
+        return await cur.fetchone() is not None
+
+
+async def _tool_get_list_items(note_id: str, user_id: str) -> str:
+    logger.debug("_tool_get_list_items note_id=%s user=%s", note_id, user_id)
+    try:
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            if not await _check_list_access(conn, note_id, user_id):
+                logger.warning("_tool_get_list_items: access denied note_id=%s user=%s", note_id, user_id)
+                return json.dumps({"error": "Note not found or access denied"})
+            async with conn.execute(
+                "SELECT id, content, completed, position FROM list_items"
+                " WHERE note_id = ? ORDER BY position ASC, created_at ASC",
+                (note_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        items = [
+            {"id": r["id"], "content": r["content"],
+             "completed": bool(r["completed"]), "position": r["position"]}
+            for r in rows
+        ]
+        return json.dumps({"items": items})
+    except Exception as exc:
+        logger.error("_tool_get_list_items failed: %s", exc, exc_info=True)
+        return json.dumps({"error": str(exc)})
+
+
+async def _tool_add_list_item(note_id: str, content: str, user_id: str) -> str:
+    logger.debug("_tool_add_list_item note_id=%s content=%r user=%s", note_id, content, user_id)
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        item_id = str(uuid.uuid4())
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            if user_id and not await _check_list_access(conn, note_id, user_id):
+                logger.warning("_tool_add_list_item: access denied note_id=%s user=%s", note_id, user_id)
+                return json.dumps({"error": "Note not found or access denied"})
+            async with conn.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM list_items WHERE note_id = ?",
+                (note_id,),
+            ) as cur:
+                row = await cur.fetchone()
+                position = row[0] if row else 0
+            await conn.execute(
+                "INSERT INTO list_items (id, note_id, content, completed, position, created_at)"
+                " VALUES (?,?,?,0,?,?)",
+                (item_id, note_id, content, position, now),
+            )
+            await conn.execute(
+                "UPDATE notes SET updated_at = ? WHERE id = ?", (now, note_id)
+            )
+            await conn.commit()
+        return json.dumps({"item_id": item_id, "content": content, "position": position})
+    except Exception as exc:
+        logger.error("_tool_add_list_item failed: %s", exc, exc_info=True)
+        return json.dumps({"error": str(exc)})
+
+
+async def _tool_complete_list_item(note_id: str, item_id: str, user_id: str) -> str:
+    logger.debug("_tool_complete_list_item note_id=%s item_id=%s user=%s", note_id, item_id, user_id)
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            if not await _check_list_access(conn, note_id, user_id):
+                logger.warning("_tool_complete_list_item: access denied note_id=%s user=%s", note_id, user_id)
+                return json.dumps({"error": "Note not found or access denied"})
+            cur = await conn.execute(
+                "UPDATE list_items SET completed = 1 WHERE id = ? AND note_id = ?",
+                (item_id, note_id),
+            )
+            if cur.rowcount == 0:
+                logger.warning("_tool_complete_list_item: item not found item_id=%s note_id=%s", item_id, note_id)
+                return json.dumps({"error": "Item not found"})
+            await conn.execute(
+                "UPDATE notes SET updated_at = ? WHERE id = ?", (now, note_id)
+            )
+            await conn.commit()
+        return json.dumps({"success": True, "item_id": item_id})
+    except Exception as exc:
+        logger.error("_tool_complete_list_item failed: %s", exc, exc_info=True)
+        return json.dumps({"error": str(exc)})
+
+
+async def _tool_delete_list_item(note_id: str, item_id: str, user_id: str) -> str:
+    logger.debug("_tool_delete_list_item note_id=%s item_id=%s user=%s", note_id, item_id, user_id)
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            if not await _check_list_access(conn, note_id, user_id):
+                logger.warning("_tool_delete_list_item: access denied note_id=%s user=%s", note_id, user_id)
+                return json.dumps({"error": "Note not found or access denied"})
+            cur = await conn.execute(
+                "DELETE FROM list_items WHERE id = ? AND note_id = ?",
+                (item_id, note_id),
+            )
+            if cur.rowcount == 0:
+                logger.warning("_tool_delete_list_item: item not found item_id=%s note_id=%s", item_id, note_id)
+                return json.dumps({"error": "Item not found"})
+            await conn.execute(
+                "UPDATE notes SET updated_at = ? WHERE id = ?", (now, note_id)
+            )
+            await conn.commit()
+        return json.dumps({"success": True, "item_id": item_id})
+    except Exception as exc:
+        logger.error("_tool_delete_list_item failed: %s", exc, exc_info=True)
+        return json.dumps({"error": str(exc)})
+
+
+async def _tool_create_list(title: str, user_id: str, item_id: str | None = None) -> str:
+    logger.debug("_tool_create_list title=%r item_id=%r user=%s", title, item_id, user_id)
+    try:
+        note_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(settings.database_url) as conn:
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await conn.execute(
+                "INSERT INTO notes"
+                " (id, user_id, title, content, tags, folder, created_at, updated_at, note_type, indexed_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (note_id, user_id, title, "", "[]", "Lists", now, now, "list", now),
+            )
+            if item_id:
+                item_uuid = str(uuid.uuid4())
+                await conn.execute(
+                    "INSERT INTO list_items (id, note_id, content, completed, position, created_at)"
+                    " VALUES (?,?,?,0,0,?)",
+                    (item_uuid, note_id, item_id, now),
+                )
+            await conn.commit()
+        result = {"note_id": note_id, "title": title}
+        if item_id:
+            result["item_id"] = item_uuid  # type: ignore[assignment]
+        return json.dumps(result)
+    except Exception as exc:
+        logger.error("_tool_create_list failed: %s", exc, exc_info=True)
+        return json.dumps({"error": str(exc)})
+
+
+async def _index_note_inline(note_id: str, title: str, content: str,
+                              user_id: str, folder: str,
+                              tags: list[str] | None = None) -> None:
+    if not content.strip():
+        return
+    try:
+        chunks = chunk_text(content)
+        if not chunks:
+            return
+        texts = [c["text"] for c in chunks]
+        embs = await embeddings.embed_texts(texts)
+        ids = [f"{note_id}_{c['chunk_index']}" for c in chunks]
+        metas = [
+            {
+                "note_id": note_id,
+                "user_id": user_id,
+                "chunk_index": c["chunk_index"],
+                "title": title,
+                "tags": json.dumps(tags or []),
+                "folder": folder,
+                "source_type": "note",
+                "source_label": title,
+            }
+            for c in chunks
+        ]
+        await vector_store.upsert(texts, embs, metas, ids)
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(settings.database_url) as conn:
+            await conn.execute("UPDATE notes SET indexed_at = ? WHERE id = ?", (now, note_id))
+            await conn.commit()
+    except Exception:
+        logger.warning("_index_note_inline failed for note %s", note_id, exc_info=True)
+
+
+def _title_from_content(content: str) -> str:
+    for line in content.splitlines():
+        stripped = line.lstrip("#").strip()
+        if stripped:
+            return stripped[:60]
+    return "Untitled"
+
+
+async def _tool_create_note(content: str | None, user_id: str) -> str:
+    logger.debug("_tool_create_note user=%s", user_id)
+    if not content or not content.strip():
+        return json.dumps({"needs_input": "content", "prompt": "What should the note say?"})
+    try:
+        note_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        title = _title_from_content(content)
+        async with aiosqlite.connect(settings.database_url) as conn:
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await conn.execute(
+                "INSERT INTO notes"
+                " (id, user_id, title, content, tags, folder, created_at, updated_at, note_type)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (note_id, user_id, title, content, "[]", "Unfiled", now, now, "markdown"),
+            )
+            await conn.commit()
+        await _index_note_inline(note_id, title, content, user_id, "Unfiled")
+        return json.dumps({"note_id": note_id, "title": title})
+    except Exception as exc:
+        logger.error("_tool_create_note failed: %s", exc, exc_info=True)
+        return json.dumps({"error": str(exc)})
+
+
+async def _tool_create_reminder(title: str, due_date: str, content: str, user_id: str) -> str:
+    logger.debug("_tool_create_reminder title=%r due_date=%r user=%s", title, due_date, user_id)
+    try:
+        note_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(settings.database_url) as conn:
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await conn.execute(
+                "INSERT INTO notes"
+                " (id, user_id, title, content, tags, folder, created_at, updated_at, note_type, reminder_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (note_id, user_id, title, content, "[]", "Unfiled", now, now, "markdown", due_date),
+            )
+            await conn.commit()
+        if content:
+            await _index_note_inline(note_id, title, content, user_id, "Unfiled")
+        return json.dumps({"note_id": note_id, "title": title, "reminder_at": due_date})
+    except Exception as exc:
+        logger.error("_tool_create_reminder failed: %s", exc, exc_info=True)
+        return json.dumps({"error": str(exc)})
+
+
+async def _tool_create_journal_entry(content: str | None, user_id: str) -> str:
+    logger.debug("_tool_create_journal_entry user=%s", user_id)
+    if not content or not content.strip():
+        return json.dumps({"needs_input": "content", "prompt": "What would you like to journal?"})
+    try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        now_dt = datetime.now(timezone.utc)
+        # Convert to user's local timezone for display
+        try:
+            async with aiosqlite.connect(settings.database_url) as _tz_conn:
+                async with _tz_conn.execute(
+                    "SELECT value FROM user_settings WHERE user_id = ? AND key = 'server_timezone'",
+                    (user_id,),
+                ) as _cur:
+                    _row = await _cur.fetchone()
+                    tz_name = _row[0] if _row else ""
+            local_dt = now_dt.astimezone(ZoneInfo(tz_name)) if tz_name else now_dt
+        except (ZoneInfoNotFoundError, Exception):
+            local_dt = now_dt
+        now = now_dt.isoformat()
+        title = local_dt.strftime("Journal — %B %-d, %Y")
+        time_stamp = local_dt.strftime("%-I:%M %p")
+        async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            # Check for existing journal entry for today
+            async with conn.execute(
+                "SELECT id, content FROM notes"
+                " WHERE user_id = ? AND title = ? AND folder = 'Journal'"
+                " ORDER BY created_at DESC LIMIT 1",
+                (user_id, title),
+            ) as cur:
+                existing = await cur.fetchone()
+            stamped = f"**{time_stamp}**\n\n{content.strip()}"
+            if existing:
+                note_id = existing["id"]
+                merged = existing["content"] + "\n\n---\n\n" + stamped
+                await conn.execute(
+                    "UPDATE notes SET content = ?, updated_at = ? WHERE id = ?",
+                    (merged, now, note_id),
+                )
+                await conn.commit()
+                await vector_store.delete_by_note_id(note_id)
+                await _index_note_inline(note_id, title, merged, user_id, "Journal")
+                return json.dumps({"note_id": note_id, "title": title, "appended": True})
+            # No entry today — create new
+            note_id = str(uuid.uuid4())
+            await conn.execute(
+                "INSERT INTO notes"
+                " (id, user_id, title, content, tags, folder, created_at, updated_at, note_type)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (note_id, user_id, title, stamped, "[]", "Journal", now, now, "markdown"),
+            )
+            await conn.commit()
+        await _index_note_inline(note_id, title, stamped, user_id, "Journal")
+        return json.dumps({"note_id": note_id, "title": title})
+    except Exception as exc:
+        logger.error("_tool_create_journal_entry failed: %s", exc, exc_info=True)
+        return json.dumps({"error": str(exc)})
+
+
+async def _execute_tool(name: str, arguments: dict, user_id: str | None) -> str:
+    if name in ("get_list_items", "add_list_item", "complete_list_item",
+                "delete_list_item", "create_list"):
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+    if name == "get_list_items":
+        return await _tool_get_list_items(arguments.get("note_id", ""), user_id)  # type: ignore[arg-type]
+    if name == "add_list_item":
+        return await _tool_add_list_item(
+            arguments.get("note_id", ""), arguments.get("content", ""), user_id  # type: ignore[arg-type]
+        )
+    if name == "complete_list_item":
+        return await _tool_complete_list_item(
+            arguments.get("note_id", ""), arguments.get("item_id", ""), user_id  # type: ignore[arg-type]
+        )
+    if name == "delete_list_item":
+        return await _tool_delete_list_item(
+            arguments.get("note_id", ""), arguments.get("item_id", ""), user_id  # type: ignore[arg-type]
+        )
+    if name == "create_list":
+        return await _tool_create_list(arguments.get("title", ""), user_id, arguments.get("item_id"))  # type: ignore[arg-type]
+    if name == "create_note":
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        return await _tool_create_note(arguments.get("content"), user_id)
+    if name == "create_reminder":
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        return await _tool_create_reminder(
+            arguments.get("title", ""),
+            resolve_due_date(arguments.get("due_date", "")),
+            arguments.get("content", ""), user_id,
+        )
+    if name == "create_journal_entry":
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        return await _tool_create_journal_entry(arguments.get("content"), user_id)
+    return json.dumps({"error": f"Unknown tool: {name}"})
+
+
+async def _resolve_list_name(name_or_id: str, user_id: str) -> str | None:
+    """Return the list UUID for a given name or UUID. UUID match is tried first."""
+    async with aiosqlite.connect(settings.database_url) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(
+            "SELECT id FROM notes WHERE id = ? AND note_type = 'list' AND ("
+            "  user_id = ? OR id IN (SELECT note_id FROM note_shares WHERE shared_with_user_id = ?)"
+            ")",
+            (name_or_id, user_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+            if row:
+                return row["id"]
+        async with conn.execute(
+            "SELECT id FROM notes WHERE note_type = 'list'"
+            " AND title LIKE ? COLLATE NOCASE"
+            " AND (user_id = ? OR id IN (SELECT note_id FROM note_shares WHERE shared_with_user_id = ?))"
+            " ORDER BY updated_at DESC LIMIT 1",
+            (f"%{name_or_id}%", user_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return row["id"] if row else None
+
+
+async def _resolve_item_fuzzy(note_id: str, query: str) -> str | None:
+    """Return an item UUID by substring content match, or exact UUID match as fallback."""
+    async with aiosqlite.connect(settings.database_url) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(
+            "SELECT id FROM list_items WHERE note_id = ? AND content LIKE ? COLLATE NOCASE LIMIT 1",
+            (note_id, f"%{query}%"),
+        ) as cur:
+            row = await cur.fetchone()
+            if row:
+                return row["id"]
+        async with conn.execute(
+            "SELECT id FROM list_items WHERE id = ? AND note_id = ?",
+            (query, note_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return row["id"] if row else None
+
+
+async def _execute_router_tool(name: str, arguments: dict, user_id: str | None) -> str:
+    """Execute a router tool call, resolving list names and fuzzy item references to UUIDs."""
+    if not user_id:
+        return json.dumps({"error": "No user context"})
+
+    raw_note_id = arguments.get("note_id", "")
+
+    if name in ("get_list_items", "add_list_item", "complete_list_item", "delete_list_item"):
+        note_id = await _resolve_list_name(raw_note_id, user_id)
+        if not note_id:
+            return json.dumps({"error": f"List not found: {raw_note_id!r}"})
+
+        if name == "get_list_items":
+            return await _tool_get_list_items(note_id, user_id)
+
+        if name == "add_list_item":
+            return await _tool_add_list_item(note_id, arguments.get("content", ""), user_id)
+
+        raw_item = arguments.get("item_id", "")
+        item_id = await _resolve_item_fuzzy(note_id, raw_item)
+        if not item_id:
+            return json.dumps({"error": f"Item not found: {raw_item!r}"})
+
+        if name == "complete_list_item":
+            return await _tool_complete_list_item(note_id, item_id, user_id)
+        if name == "delete_list_item":
+            return await _tool_delete_list_item(note_id, item_id, user_id)
+
+    if name == "create_list":
+        return await _tool_create_list(arguments.get("title", ""), user_id, arguments.get("item_id"))
+    if name == "create_note":
+        return await _tool_create_note(arguments.get("content"), user_id)
+    if name == "create_reminder":
+        return await _tool_create_reminder(
+            arguments.get("title", ""),
+            resolve_due_date(arguments.get("due_date", "")),
+            arguments.get("content", ""), user_id,
+        )
+    if name == "create_journal_entry":
+        return await _tool_create_journal_entry(arguments.get("content"), user_id)
+
+    return json.dumps({"error": f"Unknown tool: {name}"})
+
+
+def _append_log_line(path: str, line: str) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
+async def _log_router_interaction(
+    router_messages: list[dict],
+    rounds: list[dict],
+    final_response: str | None,
+    user_id: str | None,
+) -> None:
+    if not settings.tool_router_log:
+        return
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "user_id": user_id,
+        "messages": router_messages,
+        "tool_rounds": rounds,
+        "final_response": final_response,
+    }
+    line = json.dumps(entry) + "\n"
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _append_log_line, settings.tool_router_log, line)
+    except Exception as exc:
+        logger.warning("Router log write failed: %s", exc)
+
+
+def _build_router_messages(original: list[dict]) -> list[dict]:
+    non_system = [m for m in original if m.get("role") != "system"]
+    now = datetime.now(timezone.utc)
+    now_str = now.strftime("%A, %B %-d %Y, %H:%M UTC")
+    system_msg = {
+        "role": "system",
+        "content": (
+            f"Current date and time: {now_str}.\n\n"
+            "RULES:\n"
+            "1. due_date: copy user's EXACT words verbatim — never compute dates yourself. "
+            "('friday' → pass 'friday'; 'next thursday' → pass 'next thursday'.)\n"
+            "2. create_note / create_journal_entry: only call when the user provides ACTUAL CONTENT "
+            "to save. If the user just asks to make a note without providing what to write "
+            "(e.g. 'make a note for me', 'can you make a note?'), do NOT call any tool.\n"
+            "3. List tools (add_list_item, get_list_items, etc.): only call when you know the actual "
+            "list name from the message. Never pass a pronoun or vague reference (it, that, this, the note) "
+            "as note_id.\n"
+            "4. If the assistant's previous message asked what the user would like to note/journal/say, "
+            "and the user replied with content, call create_note or create_journal_entry with that content."
+        ),
+    }
+    # Send [last_assistant, last_user] — one assistant message gives the router
+    # follow-up context (e.g. "What would you like to say?") without triggering
+    # the "already done" false-negative that multiple assistant turns caused.
+    user_msgs = [m for m in non_system if m.get("role") == "user"]
+    asst_msgs = [m for m in non_system if m.get("role") == "assistant"]
+    last_asst = asst_msgs[-1:] if asst_msgs else []
+    last_user = user_msgs[-1:] if user_msgs else []
+    return [system_msg] + last_asst + last_user
+
+
+def _parse_xml_tool_calls(content: str) -> list[dict] | None:
+    """Parse <tool_call> XML blocks that some models emit instead of structured tool_calls."""
+    import re
+    calls = []
+    for block in re.finditer(r'<tool_call>(.*?)</tool_call>', content, re.DOTALL):
+        text = block.group(1).strip()
+        # JSON format: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+        try:
+            obj = json.loads(text)
+            if "name" in obj:
+                calls.append({
+                    "id": f"xml_{len(calls)}",
+                    "type": "function",
+                    "function": {
+                        "name": obj["name"],
+                        "arguments": json.dumps(obj.get("arguments", {})),
+                    },
+                })
+                continue
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # Parameter format: <function=name><parameter=key>value</parameter>...</function>
+        fn_m = re.search(r'<function=(\w+)>(.*?)</function>', text, re.DOTALL)
+        if fn_m:
+            args = {
+                pm.group(1): pm.group(2).strip()
+                for pm in re.finditer(r'<parameter=(\w+)>(.*?)</parameter>', fn_m.group(2), re.DOTALL)
+            }
+            calls.append({
+                "id": f"xml_{len(calls)}",
+                "type": "function",
+                "function": {"name": fn_m.group(1), "arguments": json.dumps(args)},
+            })
+    return calls or None
+
+
+async def _run_tool_router(
+    raw_messages: list[dict],
+    user_id: str | None,
+) -> tuple[list[dict], list[dict]] | None:
+    """
+    Pre-pass: call the Qwen3 router to handle all tool calls.
+    Returns (augmented_messages, rounds_log) on success, or None on any
+    failure (triggers fallback to existing agentic loop).
+    rounds_log entries: {"round": N, "tool_calls": [...], "tool_results": [...]}
+    """
+    url = _router_url()
+    if not url:
+        return None
+
+    router_msgs = _build_router_messages(raw_messages)
+    accumulated: list[dict] = []
+    rounds_log: list[dict] = []
+
+    for _round in range(3):
+        payload = {
+            "model": settings.tool_router_model,
+            "messages": router_msgs + accumulated,
+            "tools": _ROUTER_TOOLS,
+            "tool_choice": "auto",
+            "temperature": 0.0,
+        }
+        try:
+            client = _get_llm_client()
+            resp = await client.post(url, json=payload, headers=_router_headers(), timeout=30.0)
+        except httpx.TimeoutException:
+            logger.warning("Tool router timed out on round %d, falling back", _round + 1)
+            return None
+        except httpx.RequestError as exc:
+            logger.warning("Tool router request error: %s, falling back", exc)
+            return None
+
+        if resp.status_code != 200:
+            logger.warning("Tool router HTTP %d on round %d, falling back", resp.status_code, _round + 1)
+            return None
+
+        try:
+            data = resp.json()
+            message = data["choices"][0]["message"]
+            tool_calls = message.get("tool_calls")
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            logger.warning("Tool router malformed response: %s, falling back", exc)
+            return None
+
+        if not tool_calls:
+            xml_calls = _parse_xml_tool_calls(message.get("content") or "")
+            if xml_calls:
+                import re as _re
+                clean = _re.sub(r'<tool_call>.*?</tool_call>', '', message.get("content", ""),
+                                flags=_re.DOTALL).strip()
+                message = {**message, "content": clean or None, "tool_calls": xml_calls}
+                tool_calls = xml_calls
+                logger.info("Router [round %d]: parsed %d XML tool call(s)", _round + 1, len(xml_calls))
+            else:
+                return raw_messages + accumulated, rounds_log
+
+        # Check original user message — if it's a pure creation request, any
+        # content the router provides must be fabricated.
+        _last_user_msg = next(
+            (m.get("content", "") for m in reversed(router_msgs) if m.get("role") == "user"), ""
+        )
+        _user_intent = _is_note_create_request(_last_user_msg)
+
+        # Validate before executing
+        for _tc in tool_calls:
+            try:
+                _fn = _tc["function"]["name"]
+                _args = json.loads(_tc["function"].get("arguments", "{}"))
+            except (KeyError, json.JSONDecodeError):
+                continue
+            # Creation tool with no/fabricated content — set pending intent
+            if _fn in ("create_note", "create_journal_entry"):
+                content_val = (_args.get("content") or "").strip()
+                if not content_val or _is_note_create_request(content_val) or _user_intent:
+                    if user_id:
+                        intent = _user_intent or ("journal" if _fn == "create_journal_entry" else "note")
+                        _set_pending_note_intent(user_id, intent)
+                        logger.info("Router [round %d]: %s blocked (user_intent=%r content=%r)", _round + 1, _fn, _user_intent, content_val[:40] if content_val else "")
+                    return raw_messages + accumulated, rounds_log
+            # List tool with vague note_id — skip
+            if _fn in _LIST_TOOL_NAMES:
+                raw_nid = _args.get("note_id", "").strip().lower()
+                if not raw_nid or raw_nid in _VAGUE_NOTE_REFS or raw_nid.startswith("the "):
+                    logger.info("Router [round %d]: vague note_id %r for %s — skipping", _round + 1, raw_nid, _fn)
+                    return raw_messages + accumulated, rounds_log
+
+        round_entry: dict = {"round": _round + 1, "tool_calls": [], "tool_results": []}
+        accumulated.append(message)
+        for tc in tool_calls:
+            try:
+                fn_name = tc["function"]["name"]
+                fn_args = json.loads(tc["function"].get("arguments", "{}"))
+            except (KeyError, json.JSONDecodeError) as exc:
+                logger.warning("Tool router bad tool call: %s, falling back", exc)
+                return None
+            # For create_reminder, override due_date by extracting directly from the
+            # user's message — the router model often computes wrong date phrases.
+            if fn_name == "create_reminder":
+                last_user = next(
+                    (m["content"] for m in reversed(router_msgs) if m.get("role") == "user"),
+                    "",
+                )
+                extracted = _extract_date_from_user_message(last_user)
+                if extracted:
+                    fn_args["due_date"] = extracted
+            logger.info("Router [round %d]: %s args=%s user=%s", _round + 1, fn_name, fn_args, user_id)
+            result = await _execute_router_tool(fn_name, fn_args, user_id)
+            round_entry["tool_calls"].append({"name": fn_name, "arguments": fn_args})
+            round_entry["tool_results"].append(result)
+            accumulated.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": result,
+            })
+        rounds_log.append(round_entry)
+        # Stop looping after any creation tool succeeds — prevents hallucinated follow-up rounds
+        for _res in round_entry["tool_results"]:
+            try:
+                if "note_id" in json.loads(_res) or "reminder_id" in json.loads(_res):
+                    return raw_messages + accumulated, rounds_log
+            except Exception:
+                pass
+
+    return raw_messages + accumulated, rounds_log
+
+
+async def _consume_pending_intent(
+    user_id: str, messages: list[dict], content: str
+) -> tuple[list[dict], list[dict]] | None:
+    """Directly create note/journal from pending intent; return (augmented_messages, rounds_log)."""
+    pending = _pending_intent.pop(user_id, None)
+    if not pending or time.time() >= pending["expires"] or not content.strip():
+        return None
+    fn = "create_journal_entry" if pending["intent"] == "journal" else "create_note"
+    create_fn = _tool_create_journal_entry if pending["intent"] == "journal" else _tool_create_note
+    result = await create_fn(content.strip(), user_id)
+    call_id = f"pi-{uuid.uuid4().hex[:6]}"
+    augmented = messages + [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": call_id, "type": "function",
+                            "function": {"name": fn, "arguments": json.dumps({"content": content.strip()})}}],
+        },
+        {"role": "tool", "tool_call_id": call_id, "content": result},
+    ]
+    rounds_log = [{"round": 1,
+                   "tool_calls": [{"name": fn, "arguments": {"content": content.strip()}}],
+                   "tool_results": [result]}]
+    return augmented, rounds_log
+
+
 def _build_messages(original: list[dict], context: str, reminders: str = "", character_prompt: str = "") -> list[dict]:
     now = datetime.now(timezone.utc).strftime("%A, %B %-d %Y, %H:%M UTC")
     char = character_prompt or _DEFAULT_CHARACTER_PROMPT
@@ -321,6 +1343,7 @@ class ChatRequest(BaseModel):
     max_tokens: int | None = None
     temperature: float | None = None
     skip_reminders: bool = False
+    skip_footer: bool = False
     user_id: str | None = None
 
 
@@ -352,6 +1375,43 @@ async def chat_completions(body: ChatRequest):
     if body.stream:
         payload["stream"] = True
 
+        _stream_router_msgs: list[dict] = []
+        _stream_rounds_log: list[dict] = []
+        _stream_raw = [m.model_dump() for m in body.messages]
+        _stream_last_user = (user_msgs[-1].content or "").strip() if user_msgs else ""
+
+        # Pending-intent fast path for streaming
+        if body.user_id and body.user_id in _pending_intent:
+            _pi = await _consume_pending_intent(body.user_id, _stream_raw, _stream_last_user)
+            if _pi:
+                _pi_aug, _stream_rounds_log = _pi
+                payload["messages"] = _build_messages(_pi_aug, context, reminders_text, character_prompt)
+        elif body.user_id and settings.tool_router_base_url:
+            router_result = await _run_tool_router(_stream_raw, body.user_id)
+            if router_result is not None:
+                augmented, _stream_rounds_log = router_result
+                _stream_router_msgs = _build_router_messages(_stream_raw)
+                if not _stream_rounds_log and body.user_id:
+                    if _stream_last_user and body.user_id not in _pending_intent:
+                        intent = _is_note_create_request(_stream_last_user)
+                        if intent:
+                            _set_pending_note_intent(body.user_id, intent)
+                    _spi = _pending_intent.get(body.user_id)
+                    if _spi and time.time() < _spi["expires"]:
+                        _q = "What would you like to journal?" if _spi["intent"] == "journal" else "What should the note say?"
+
+                        async def _ask_stream(_q=_q):
+                            chunk = json.dumps({
+                                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                                "object": "chat.completion.chunk",
+                                "choices": [{"index": 0, "delta": {"role": "assistant", "content": _q}, "finish_reason": None}],
+                            })
+                            yield f"data: {chunk}\n\n".encode()
+                            yield b"data: [DONE]\n\n"
+
+                        return StreamingResponse(_ask_stream(), media_type="text/event-stream")
+                payload["messages"] = _build_messages(augmented, context, reminders_text, character_prompt)
+
         async def _stream():
             buf = b""
             response_text = ""
@@ -364,7 +1424,7 @@ async def chat_completions(body: ChatRequest):
                     for line in lines[:-1]:
                         if line.strip() == b"data: [DONE]":
                             used_sources = _filter_sources_by_citations(response_text, sources)
-                            footer = _format_sources_md(used_sources) + reminders_md
+                            footer = "" if body.skip_footer else (_format_sources_md(used_sources) + reminders_md)
                             if footer:
                                 src_chunk = json.dumps({
                                     "id": "chatcmpl-src",
@@ -372,6 +1432,11 @@ async def chat_completions(body: ChatRequest):
                                     "choices": [{"index": 0, "delta": {"content": footer}, "finish_reason": None}],
                                 })
                                 yield f"data: {src_chunk}\n\n".encode()
+                            if _stream_rounds_log:
+                                asyncio.create_task(_log_router_interaction(
+                                    _stream_router_msgs, _stream_rounds_log,
+                                    response_text or None, body.user_id,
+                                ))
                             yield b"data: [DONE]\n\n"
                         else:
                             if line.startswith(b"data: "):
@@ -389,15 +1454,113 @@ async def chat_completions(body: ChatRequest):
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
     client = _get_llm_client()
-    resp = await client.post(_llm_url(), json=payload, headers=_headers())
-    data = resp.json()
-    if resp.status_code == 200:
+    raw_messages = [m.model_dump() for m in body.messages]
+    last_user_content = (user_msgs[-1].content or "").strip() if user_msgs else ""
+
+    # Pending-intent fast path: bypass router, create note/journal directly
+    if body.user_id and body.user_id in _pending_intent:
+        pi = await _consume_pending_intent(body.user_id, raw_messages, last_user_content)
+        if pi:
+            augmented, rounds_log = pi
+            payload["messages"] = _build_messages(augmented, context, reminders_text, character_prompt)
+            resp = await client.post(_llm_url(), json=payload, headers=_headers())
+            data = resp.json()
+            response_text: str | None = None
+            try:
+                response_text = data["choices"][0]["message"].get("content") or ""
+                used_sources = _filter_sources_by_citations(response_text, sources)
+                footer = "" if body.skip_footer else (_format_sources_md(used_sources) + reminders_md)
+                if footer:
+                    data["choices"][0]["message"]["content"] = response_text + footer
+            except (KeyError, IndexError, TypeError):
+                pass
+            asyncio.create_task(_log_router_interaction(
+                _build_router_messages(raw_messages), rounds_log, response_text, body.user_id,
+            ))
+            return JSONResponse(content=data, status_code=resp.status_code)
+
+    # Tool-router pre-pass: small model handles tool decisions, main LLM only generates
+    if body.user_id and settings.tool_router_base_url:
+        router_result = await _run_tool_router(raw_messages, body.user_id)
+        if router_result is not None:
+            augmented, rounds_log = router_result
+            if not rounds_log and body.user_id:
+                # Pattern-check sets pending if router made zero calls for note/journal request
+                if last_user_content and body.user_id not in _pending_intent:
+                    intent = _is_note_create_request(last_user_content)
+                    if intent:
+                        _set_pending_note_intent(body.user_id, intent)
+                # If pending intent exists (set here or by router validation), return question
+                pi = _pending_intent.get(body.user_id)
+                if pi and time.time() < pi["expires"]:
+                    q = "What would you like to journal?" if pi["intent"] == "journal" else "What should the note say?"
+                    return JSONResponse(content=_make_text_response(q))
+            payload["messages"] = _build_messages(augmented, context, reminders_text, character_prompt)
+            resp = await client.post(_llm_url(), json=payload, headers=_headers())
+            data = resp.json()
+            response_text = None
+            try:
+                response_text = data["choices"][0]["message"].get("content") or ""
+                used_sources = _filter_sources_by_citations(response_text, sources)
+                footer = "" if body.skip_footer else (_format_sources_md(used_sources) + reminders_md)
+                if footer:
+                    data["choices"][0]["message"]["content"] = response_text + footer
+            except (KeyError, IndexError, TypeError):
+                pass
+            asyncio.create_task(_log_router_interaction(
+                _build_router_messages(raw_messages), rounds_log, response_text, body.user_id,
+            ))
+            return JSONResponse(content=data, status_code=resp.status_code)
+
+    # Fallback: existing agentic loop (used when router is not configured or fails)
+    # Add list tools when we have a user context
+    if body.user_id:
+        payload["tools"] = _LIST_TOOLS
+        payload["tool_choice"] = "auto"
+
+    # Tool-calling loop (max 5 rounds to prevent runaway)
+    for _round in range(5):
+        resp = await client.post(_llm_url(), json=payload, headers=_headers())
+        data = resp.json()
+        if resp.status_code != 200:
+            break
         try:
-            response_text = data["choices"][0]["message"]["content"]
-            used_sources = _filter_sources_by_citations(response_text, sources)
-            footer = _format_sources_md(used_sources) + reminders_md
-            if footer:
-                data["choices"][0]["message"]["content"] += footer
+            message = data["choices"][0]["message"]
+            tool_calls = message.get("tool_calls")
         except (KeyError, IndexError, TypeError):
-            pass
+            break
+
+        if not tool_calls:
+            # Final text response
+            try:
+                response_text = message.get("content") or ""
+                used_sources = _filter_sources_by_citations(response_text, sources)
+                footer = "" if body.skip_footer else (_format_sources_md(used_sources) + reminders_md)
+                if footer:
+                    data["choices"][0]["message"]["content"] = response_text + footer
+            except (KeyError, IndexError, TypeError):
+                pass
+            break
+
+        # Execute tool calls and feed results back
+        payload["messages"].append(message)
+        for tc in tool_calls:
+            try:
+                fn_name = tc["function"]["name"]
+                fn_args = json.loads(tc["function"].get("arguments", "{}"))
+            except (KeyError, json.JSONDecodeError):
+                fn_name, fn_args = "unknown", {}
+            logger.info("Tool call [round %d]: %s args=%s user=%s", _round + 1, fn_name, fn_args, body.user_id)
+            result = await _execute_tool(fn_name, fn_args, body.user_id)
+            try:
+                result_data = json.loads(result)
+                logger.info("Tool result [%s]: %s", fn_name, result_data)
+            except Exception:
+                logger.info("Tool result [%s]: %s", fn_name, result)
+            payload["messages"].append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": result,
+            })
+
     return JSONResponse(content=data, status_code=resp.status_code)

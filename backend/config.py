@@ -22,11 +22,15 @@ class Settings(BaseSettings):
     chat_llm_model: str | None = None     # falls back to summary_model
     chat_n_results: int = 8               # note chunks injected as RAG context
     chat_port: int = 8084                 # port for the RAG chat API
+    tool_router_base_url: str | None = None   # e.g. http://localhost:8085; omit to disable
+    tool_router_model: str = "qwen3-tool-router"
+    tool_router_context_messages: int = 6     # last N non-system messages sent to router
+    tool_router_log: str = ""                 # JSONL log path; e.g. /data/tool_router_log.jsonl
     whisper_base_url: str = "http://localhost:10300"
     jwt_secret: str = ""
     jwt_expiry_days: int = 30
 
-    model_config = {"env_file": ".env"}
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 settings = Settings()
