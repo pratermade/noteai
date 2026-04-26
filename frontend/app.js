@@ -684,8 +684,8 @@ async function saveNote() {
     }
     state.saveDirty = false;
     setBadge('saved');
-    setEditMode(false);
     startIndexPoll(state.currentNoteId);
+    closeEditor();
     await loadNotes();
     await loadSidebar();
     return true;
