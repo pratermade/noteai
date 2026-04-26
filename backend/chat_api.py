@@ -1146,6 +1146,13 @@ async def _run_tool_router(
             else:
                 return raw_messages + accumulated, rounds_log
 
+        # Check original user message — if it's a pure creation request, any
+        # content the router provides must be fabricated.
+        _last_user_msg = next(
+            (m.get("content", "") for m in reversed(router_msgs) if m.get("role") == "user"), ""
+        )
+        _user_intent = _is_note_create_request(_last_user_msg)
+
         # Validate before executing
         for _tc in tool_calls:
             try:
@@ -1153,14 +1160,14 @@ async def _run_tool_router(
                 _args = json.loads(_tc["function"].get("arguments", "{}"))
             except (KeyError, json.JSONDecodeError):
                 continue
-            # Creation tool with no content (or content is just the command) — set pending intent
+            # Creation tool with no/fabricated content — set pending intent
             if _fn in ("create_note", "create_journal_entry"):
                 content_val = (_args.get("content") or "").strip()
-                if not content_val or _is_note_create_request(content_val):
+                if not content_val or _is_note_create_request(content_val) or _user_intent:
                     if user_id:
-                        intent = "journal" if _fn == "create_journal_entry" else "note"
+                        intent = _user_intent or ("journal" if _fn == "create_journal_entry" else "note")
                         _set_pending_note_intent(user_id, intent)
-                        logger.info("Router [round %d]: %s content is empty/command %r — pending intent set", _round + 1, _fn, content_val)
+                        logger.info("Router [round %d]: %s blocked (user_intent=%r content=%r)", _round + 1, _fn, _user_intent, content_val[:40] if content_val else "")
                     return raw_messages + accumulated, rounds_log
             # List tool with vague note_id — skip
             if _fn in _LIST_TOOL_NAMES:
