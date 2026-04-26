@@ -393,6 +393,33 @@ _LIST_TOOLS = [
 _LIST_TOOL_NAMES = {"get_list_items", "add_list_item", "complete_list_item", "delete_list_item"}
 _VAGUE_NOTE_REFS = {"it", "that", "this", "the", "them", "those", "note", "list", "one", "here"}
 
+# Pending note/journal intent: set when creation attempted without content,
+# consumed on the next user message to bypass the router entirely.
+_pending_intent: dict[str, dict] = {}  # {user_id: {"intent": str, "expires": float}}
+
+_NOTE_CREATE_RE = re.compile(
+    r'\b(take|make|write|create|add|new|record|jot)(\s+a)?\s+(?:note|jot)\b'
+    r'|^note\s+(this|that|for\s+me)$',
+    re.I,
+)
+_JOURNAL_CREATE_RE = re.compile(
+    r'\b(take|make|write|create|add|new|record)(\s+a)?\s+journal\b|\bdiary\s+entry\b',
+    re.I,
+)
+
+
+def _is_note_create_request(msg: str) -> str | None:
+    """Return 'note' or 'journal' if msg is a pure creation request (no inline content)."""
+    msg = msg.strip()
+    if len(msg) > 80 or re.search(r'[,;:—]', msg):
+        return None
+    if _JOURNAL_CREATE_RE.search(msg):
+        return "journal"
+    if _NOTE_CREATE_RE.search(msg):
+        return "note"
+    return None
+
+
 _ROUTER_TOOLS = [
     {
         "type": "function",
@@ -1133,6 +1160,15 @@ async def _run_tool_router(
                     fn_args["due_date"] = extracted
             logger.info("Router [round %d]: %s args=%s user=%s", _round + 1, fn_name, fn_args, user_id)
             result = await _execute_router_tool(fn_name, fn_args, user_id)
+            if user_id:
+                try:
+                    if "needs_input" in json.loads(result):
+                        _pending_intent[user_id] = {
+                            "intent": "journal" if fn_name == "create_journal_entry" else "note",
+                            "expires": time.time() + 300,
+                        }
+                except Exception:
+                    pass
             round_entry["tool_calls"].append({"name": fn_name, "arguments": fn_args})
             round_entry["tool_results"].append(result)
             accumulated.append({
@@ -1143,6 +1179,32 @@ async def _run_tool_router(
         rounds_log.append(round_entry)
 
     return raw_messages + accumulated, rounds_log
+
+
+async def _consume_pending_intent(
+    user_id: str, messages: list[dict], content: str
+) -> tuple[list[dict], list[dict]] | None:
+    """Directly create note/journal from pending intent; return (augmented_messages, rounds_log)."""
+    pending = _pending_intent.pop(user_id, None)
+    if not pending or time.time() >= pending["expires"] or not content.strip():
+        return None
+    fn = "create_journal_entry" if pending["intent"] == "journal" else "create_note"
+    create_fn = _tool_create_journal_entry if pending["intent"] == "journal" else _tool_create_note
+    result = await create_fn(content.strip(), user_id)
+    call_id = f"pi-{uuid.uuid4().hex[:6]}"
+    augmented = messages + [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": call_id, "type": "function",
+                            "function": {"name": fn, "arguments": json.dumps({"content": content.strip()})}}],
+        },
+        {"role": "tool", "tool_call_id": call_id, "content": result},
+    ]
+    rounds_log = [{"round": 1,
+                   "tool_calls": [{"name": fn, "arguments": {"content": content.strip()}}],
+                   "tool_results": [result]}]
+    return augmented, rounds_log
 
 
 def _build_messages(original: list[dict], context: str, reminders: str = "", character_prompt: str = "") -> list[dict]:
@@ -1244,12 +1306,24 @@ async def chat_completions(body: ChatRequest):
 
         _stream_router_msgs: list[dict] = []
         _stream_rounds_log: list[dict] = []
-        if body.user_id and settings.tool_router_base_url:
-            raw_messages = [m.model_dump() for m in body.messages]
-            router_result = await _run_tool_router(raw_messages, body.user_id)
+        _stream_raw = [m.model_dump() for m in body.messages]
+        _stream_last_user = (user_msgs[-1].content or "").strip() if user_msgs else ""
+
+        # Pending-intent fast path for streaming
+        if body.user_id and body.user_id in _pending_intent:
+            _pi = await _consume_pending_intent(body.user_id, _stream_raw, _stream_last_user)
+            if _pi:
+                _pi_aug, _stream_rounds_log = _pi
+                payload["messages"] = _build_messages(_pi_aug, context, reminders_text, character_prompt)
+        elif body.user_id and settings.tool_router_base_url:
+            router_result = await _run_tool_router(_stream_raw, body.user_id)
             if router_result is not None:
                 augmented, _stream_rounds_log = router_result
-                _stream_router_msgs = _build_router_messages(raw_messages)
+                _stream_router_msgs = _build_router_messages(_stream_raw)
+                if not _stream_rounds_log and _stream_last_user:
+                    intent = _is_note_create_request(_stream_last_user)
+                    if intent:
+                        _pending_intent[body.user_id] = {"intent": intent, "expires": time.time() + 300}
                 payload["messages"] = _build_messages(augmented, context, reminders_text, character_prompt)
 
         async def _stream():
@@ -1294,17 +1368,45 @@ async def chat_completions(body: ChatRequest):
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
     client = _get_llm_client()
+    raw_messages = [m.model_dump() for m in body.messages]
+    last_user_content = (user_msgs[-1].content or "").strip() if user_msgs else ""
 
-    # Tool-router pre-pass: small model handles tool decisions, main LLM only generates
-    if body.user_id and settings.tool_router_base_url:
-        raw_messages = [m.model_dump() for m in body.messages]
-        router_result = await _run_tool_router(raw_messages, body.user_id)
-        if router_result is not None:
-            augmented, rounds_log = router_result
+    # Pending-intent fast path: bypass router, create note/journal directly
+    if body.user_id and body.user_id in _pending_intent:
+        pi = await _consume_pending_intent(body.user_id, raw_messages, last_user_content)
+        if pi:
+            augmented, rounds_log = pi
             payload["messages"] = _build_messages(augmented, context, reminders_text, character_prompt)
             resp = await client.post(_llm_url(), json=payload, headers=_headers())
             data = resp.json()
             response_text: str | None = None
+            try:
+                response_text = data["choices"][0]["message"].get("content") or ""
+                used_sources = _filter_sources_by_citations(response_text, sources)
+                footer = "" if body.skip_footer else (_format_sources_md(used_sources) + reminders_md)
+                if footer:
+                    data["choices"][0]["message"]["content"] = response_text + footer
+            except (KeyError, IndexError, TypeError):
+                pass
+            asyncio.create_task(_log_router_interaction(
+                _build_router_messages(raw_messages), rounds_log, response_text, body.user_id,
+            ))
+            return JSONResponse(content=data, status_code=resp.status_code)
+
+    # Tool-router pre-pass: small model handles tool decisions, main LLM only generates
+    if body.user_id and settings.tool_router_base_url:
+        router_result = await _run_tool_router(raw_messages, body.user_id)
+        if router_result is not None:
+            augmented, rounds_log = router_result
+            # If router made no tool calls, detect note/journal intent and set pending
+            if not rounds_log and body.user_id and last_user_content:
+                intent = _is_note_create_request(last_user_content)
+                if intent:
+                    _pending_intent[body.user_id] = {"intent": intent, "expires": time.time() + 300}
+            payload["messages"] = _build_messages(augmented, context, reminders_text, character_prompt)
+            resp = await client.post(_llm_url(), json=payload, headers=_headers())
+            data = resp.json()
+            response_text = None
             try:
                 response_text = data["choices"][0]["message"].get("content") or ""
                 used_sources = _filter_sources_by_citations(response_text, sources)
