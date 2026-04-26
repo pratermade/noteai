@@ -841,12 +841,33 @@ async def _tool_create_journal_entry(content: str | None, user_id: str) -> str:
     if not content or not content.strip():
         return json.dumps({"needs_input": "content", "prompt": "What would you like to journal?"})
     try:
-        note_id = str(uuid.uuid4())
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         title = now_dt.strftime("Journal — %B %-d, %Y")
         async with aiosqlite.connect(settings.database_url) as conn:
+            conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
+            # Check for existing journal entry for today
+            async with conn.execute(
+                "SELECT id, content FROM notes"
+                " WHERE user_id = ? AND title = ? AND folder = 'Journal'"
+                " ORDER BY created_at DESC LIMIT 1",
+                (user_id, title),
+            ) as cur:
+                existing = await cur.fetchone()
+            if existing:
+                note_id = existing["id"]
+                merged = existing["content"] + "\n\n---\n\n" + content.strip()
+                await conn.execute(
+                    "UPDATE notes SET content = ?, updated_at = ? WHERE id = ?",
+                    (merged, now, note_id),
+                )
+                await conn.commit()
+                await vector_store.delete_by_note_id(note_id)
+                await _index_note_inline(note_id, title, merged, user_id, "Journal")
+                return json.dumps({"note_id": note_id, "title": title, "appended": True})
+            # No entry today — create new
+            note_id = str(uuid.uuid4())
             await conn.execute(
                 "INSERT INTO notes"
                 " (id, user_id, title, content, tags, folder, created_at, updated_at, note_type)"
@@ -854,8 +875,7 @@ async def _tool_create_journal_entry(content: str | None, user_id: str) -> str:
                 (note_id, user_id, title, content, "[]", "Journal", now, now, "markdown"),
             )
             await conn.commit()
-        if content:
-            await _index_note_inline(note_id, title, content, user_id, "Journal")
+        await _index_note_inline(note_id, title, content, user_id, "Journal")
         return json.dumps({"note_id": note_id, "title": title})
     except Exception as exc:
         logger.error("_tool_create_journal_entry failed: %s", exc, exc_info=True)
