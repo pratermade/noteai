@@ -390,6 +390,9 @@ _LIST_TOOLS = [
 ]
 
 
+_LIST_TOOL_NAMES = {"get_list_items", "add_list_item", "complete_list_item", "delete_list_item"}
+_VAGUE_NOTE_REFS = {"it", "that", "this", "the", "them", "those", "note", "list", "one", "here"}
+
 _ROUTER_TOOLS = [
     {
         "type": "function",
@@ -976,13 +979,16 @@ def _build_router_messages(original: list[dict]) -> list[dict]:
     system_msg = {
         "role": "system",
         "content": (
-            f"Current date and time: {now_str}. "
-            "For due_date you MUST copy the user's exact words verbatim — "
-            "do NOT compute or convert the date yourself. "
-            "Examples: user says 'friday' → pass 'friday'; "
-            "'next thursday' → pass 'next thursday'; "
-            "'tomorrow morning' → pass 'tomorrow morning'. "
-            "The system resolves the phrase automatically."
+            f"Current date and time: {now_str}.\n\n"
+            "RULES:\n"
+            "1. due_date: copy user's EXACT words verbatim — never compute dates yourself. "
+            "('friday' → pass 'friday'; 'next thursday' → pass 'next thursday'.)\n"
+            "2. create_note / create_journal_entry: only call when the user provides ACTUAL CONTENT "
+            "to save. If the user just asks to make a note without providing what to write "
+            "(e.g. 'make a note for me', 'can you make a note?'), do NOT call any tool.\n"
+            "3. List tools (add_list_item, get_list_items, etc.): only call when you know the actual "
+            "list name from the message. Never pass a pronoun or vague reference (it, that, this, the note) "
+            "as note_id."
         ),
     }
     # Send [last_assistant, last_user] — one assistant message gives the router
@@ -1090,6 +1096,19 @@ async def _run_tool_router(
                 logger.info("Router [round %d]: parsed %d XML tool call(s)", _round + 1, len(xml_calls))
             else:
                 return raw_messages + accumulated, rounds_log
+
+        # Validate before executing — skip round if any list tool has a vague note_id
+        for _tc in tool_calls:
+            try:
+                _fn = _tc["function"]["name"]
+                _args = json.loads(_tc["function"].get("arguments", "{}"))
+            except (KeyError, json.JSONDecodeError):
+                continue
+            if _fn in _LIST_TOOL_NAMES:
+                raw_nid = _args.get("note_id", "").strip().lower()
+                if not raw_nid or raw_nid in _VAGUE_NOTE_REFS or raw_nid.startswith("the "):
+                    logger.info("Router [round %d]: vague note_id %r for %s — skipping", _round + 1, raw_nid, _fn)
+                    return raw_messages + accumulated, rounds_log
 
         round_entry: dict = {"round": _round + 1, "tool_calls": [], "tool_results": []}
         accumulated.append(message)
