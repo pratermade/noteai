@@ -842,8 +842,9 @@ async def _tool_create_journal_entry(content: str | None, user_id: str) -> str:
         return json.dumps({"needs_input": "content", "prompt": "What would you like to journal?"})
     try:
         note_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-        title = _title_from_content(content)
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        title = now_dt.strftime("Journal — %B %-d, %Y")
         async with aiosqlite.connect(settings.database_url) as conn:
             await conn.execute("PRAGMA foreign_keys = ON")
             await conn.execute(
