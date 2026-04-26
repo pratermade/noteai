@@ -745,7 +745,7 @@ def _title_from_content(content: str) -> str:
 
 async def _tool_create_note(content: str | None, user_id: str) -> str:
     logger.debug("_tool_create_note user=%s", user_id)
-    if content is None:
+    if not content or not content.strip():
         return json.dumps({"needs_input": "content", "prompt": "What should the note say?"})
     try:
         note_id = str(uuid.uuid4())
@@ -791,7 +791,7 @@ async def _tool_create_reminder(title: str, due_date: str, content: str, user_id
 
 async def _tool_create_journal_entry(content: str | None, user_id: str) -> str:
     logger.debug("_tool_create_journal_entry user=%s", user_id)
-    if content is None:
+    if not content or not content.strip():
         return json.dumps({"needs_input": "content", "prompt": "What would you like to journal?"})
     try:
         note_id = str(uuid.uuid4())
@@ -988,7 +988,9 @@ def _build_router_messages(original: list[dict]) -> list[dict]:
             "(e.g. 'make a note for me', 'can you make a note?'), do NOT call any tool.\n"
             "3. List tools (add_list_item, get_list_items, etc.): only call when you know the actual "
             "list name from the message. Never pass a pronoun or vague reference (it, that, this, the note) "
-            "as note_id."
+            "as note_id.\n"
+            "4. If the assistant's previous message asked what the user would like to note/journal/say, "
+            "and the user replied with content, call create_note or create_journal_entry with that content."
         ),
     }
     # Send [last_assistant, last_user] — one assistant message gives the router
