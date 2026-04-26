@@ -7,6 +7,7 @@ _DATABASE_URL = os.environ.get("DATABASE_URL", "./notes.db")
 
 
 def _db_get(key: str) -> str | None:
+    """Read from global app_settings."""
     try:
         with sqlite3.connect(_DATABASE_URL) as conn:
             cur = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
@@ -16,8 +17,27 @@ def _db_get(key: str) -> str | None:
         return None
 
 
+def _db_get_user(user_id: str, key: str) -> str | None:
+    """Read from per-user user_settings."""
+    try:
+        with sqlite3.connect(_DATABASE_URL) as conn:
+            cur = conn.execute(
+                "SELECT value FROM user_settings WHERE user_id = ? AND key = ?",
+                (user_id, key),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception:
+        return None
+
+
 def _cfg(db_key: str, env_key: str, default: str = "") -> str:
-    """DB setting → env var → hardcoded default."""
+    """user_settings[bot_user_id] → app_settings (legacy) → env var → default."""
+    bot_user_id = _db_get("bot_user_id")
+    if bot_user_id:
+        val = _db_get_user(bot_user_id, db_key)
+        if val:
+            return val
     return _db_get(db_key) or os.environ.get(env_key) or default
 
 

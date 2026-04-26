@@ -7,12 +7,9 @@ from pydantic import BaseModel, field_validator
 FOLDERS = [
     "Unfiled",
     "Reference",
-    "Ideas",
     "Todo",
-    "Review Later",
-    "Projects",
     "Journal",
-    "Resources",
+    "Lists",
     "Archive",
 ]
 
@@ -22,7 +19,7 @@ class NoteCreate(BaseModel):
     content: str
     tags: list[str] = []
     folder: str = "Unfiled"
-    note_type: Literal['markdown', 'attachment', 'url', 'video'] = 'markdown'
+    note_type: Literal['markdown', 'attachment', 'url', 'video', 'list'] = 'markdown'
     reminder_at: str | None = None
 
     @field_validator("folder")
@@ -38,7 +35,7 @@ class NoteUpdate(BaseModel):
     content: str | None = None
     tags: list[str] | None = None
     folder: str | None = None
-    note_type: Literal['markdown', 'attachment', 'url', 'video'] | None = None
+    note_type: Literal['markdown', 'attachment', 'url', 'video', 'list'] | None = None
     reminder_at: str | None = None
     reminder_done: bool | None = None
 
@@ -59,7 +56,7 @@ class NoteResponse(BaseModel):
     created_at: str
     updated_at: str
     indexed_at: str | None
-    note_type: Literal['markdown', 'attachment', 'url', 'video']
+    note_type: Literal['markdown', 'attachment', 'url', 'video', 'list']
     note_summary: str | None
     reminder_at: str | None
     reminder_done: bool
@@ -119,6 +116,8 @@ class SettingsPatch(BaseModel):
     telegram_rag_model: str | None = None
     telegram_max_history: int | None = None
     character_prompt: str | None = None
+    telegram_bot_user_id: str | None = None
+    telegram_user_id: str | None = None
 
 
 class SettingsResponse(BaseModel):
@@ -132,6 +131,8 @@ class SettingsResponse(BaseModel):
     telegram_rag_model: str
     telegram_max_history: int
     character_prompt: str
+    telegram_bot_user_id: str
+    telegram_user_id: str
 
 
 class LoginRequest(BaseModel):
@@ -166,3 +167,30 @@ class ReindexJob(BaseModel):
     started_at: str
     finished_at: str | None = None
     errors: list[dict] = []
+
+
+class ListItemCreate(BaseModel):
+    content: str
+    position: int = 0
+
+
+class ListItemUpdate(BaseModel):
+    content: str | None = None
+    completed: bool | None = None
+    position: int | None = None
+
+
+class ListItemResponse(BaseModel):
+    id: str
+    note_id: str
+    content: str
+    completed: bool
+    position: int
+    created_at: str
+
+
+class NoteShareResponse(BaseModel):
+    note_id: str
+    shared_with_user_id: str
+    shared_with_username: str
+    created_at: str
