@@ -403,7 +403,10 @@ _NOTE_CREATE_RE = re.compile(
     re.I,
 )
 _JOURNAL_CREATE_RE = re.compile(
-    r'\b(take|make|write|create|add|new|record)(\s+a)?\s+journal\b|\bdiary\s+entry\b',
+    r'\b(take|make|write|create|add|new|record)(\s+a(?:nother)?)?\s+journal\b'
+    r'|\bdiary\s+entry\b'
+    r'|\bjournal\s+entry\b'
+    r'|^journal\s*(for\s+me|please|today)?\s*$',
     re.I,
 )
 
