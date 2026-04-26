@@ -1150,13 +1150,14 @@ async def _run_tool_router(
                 _args = json.loads(_tc["function"].get("arguments", "{}"))
             except (KeyError, json.JSONDecodeError):
                 continue
-            # Creation tool with no content — set pending intent, let orchestrator ask
+            # Creation tool with no content (or content is just the command) — set pending intent
             if _fn in ("create_note", "create_journal_entry"):
-                if not (_args.get("content") or "").strip():
+                content_val = (_args.get("content") or "").strip()
+                if not content_val or _is_note_create_request(content_val):
                     if user_id:
                         intent = "journal" if _fn == "create_journal_entry" else "note"
                         _set_pending_note_intent(user_id, intent)
-                        logger.info("Router [round %d]: %s called with no content — pending intent set", _round + 1, _fn)
+                        logger.info("Router [round %d]: %s content is empty/command %r — pending intent set", _round + 1, _fn, content_val)
                     return raw_messages + accumulated, rounds_log
             # List tool with vague note_id — skip
             if _fn in _LIST_TOOL_NAMES:
@@ -1194,6 +1195,13 @@ async def _run_tool_router(
                 "content": result,
             })
         rounds_log.append(round_entry)
+        # Stop looping after any creation tool succeeds — prevents hallucinated follow-up rounds
+        for _res in round_entry["tool_results"]:
+            try:
+                if "note_id" in json.loads(_res) or "reminder_id" in json.loads(_res):
+                    return raw_messages + accumulated, rounds_log
+            except Exception:
+                pass
 
     return raw_messages + accumulated, rounds_log
 
