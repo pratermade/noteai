@@ -383,7 +383,7 @@ _LIST_TOOLS = [
                 "properties": {
                     "content": {"type": "string", "description": "Journal entry body in markdown"},
                 },
-                "required": [],
+                "required": ["content"],
             },
         },
     },
@@ -505,7 +505,7 @@ _ROUTER_TOOLS = [
                 "properties": {
                     "content": {"type": "string", "description": "Journal entry body in markdown"},
                 },
-                "required": [],
+                "required": ["content"],
             },
         },
     },
@@ -985,12 +985,14 @@ def _build_router_messages(original: list[dict]) -> list[dict]:
             "The system resolves the phrase automatically."
         ),
     }
-    # Send only the last user message — the router only needs to decide if the
-    # current request requires a tool call. Previous turns mislead the router
-    # into acting on old messages or skipping tools for follow-up requests.
+    # Send [last_assistant, last_user] — one assistant message gives the router
+    # follow-up context (e.g. "What would you like to say?") without triggering
+    # the "already done" false-negative that multiple assistant turns caused.
     user_msgs = [m for m in non_system if m.get("role") == "user"]
+    asst_msgs = [m for m in non_system if m.get("role") == "assistant"]
+    last_asst = asst_msgs[-1:] if asst_msgs else []
     last_user = user_msgs[-1:] if user_msgs else []
-    return [system_msg] + last_user
+    return [system_msg] + last_asst + last_user
 
 
 def _parse_xml_tool_calls(content: str) -> list[dict] | None:
