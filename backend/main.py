@@ -488,8 +488,7 @@ def _purge_expired_shares() -> None:
     expired = [t for t, v in _pending_share.items() if v["expires_at"] < now]
     for t in expired:
         entry = _pending_share.pop(t)
-        if entry.get("tmp_path"):
-            Path(entry["tmp_path"]).unlink(missing_ok=True)
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1415,7 +1414,8 @@ async def share(
             att_id = str(uuid.uuid4())
             note_dir = ATTACHMENT_DIR / note.id
             note_dir.mkdir(parents=True, exist_ok=True)
-            stored_filename = f"{att_id}.pdf"
+            ext = _IMAGE_EXT.get(mime, ".pdf")
+            stored_filename = f"{att_id}{ext}"
             stored_path = Path(note.id) / stored_filename
             full_path = ATTACHMENT_DIR / stored_path
             async with aiofiles.open(full_path, "wb") as f:
@@ -1425,9 +1425,14 @@ async def share(
                 mime_type=mime, size_bytes=len(contents),
                 stored_path=str(stored_path),
             )
-            background_tasks.add_task(
-                _pdf_pipeline, att.id, note.id, str(full_path), file.filename, user_id
-            )
+            if mime == "application/pdf":
+                background_tasks.add_task(
+                    _pdf_pipeline, att.id, note.id, str(full_path), file.filename, user_id
+                )
+            else:
+                background_tasks.add_task(
+                    _index_note, note.id, note.title, "", [], "shared", user_id
+                )
         elif url or text.strip().startswith(('http://', 'https://')):
             resolved_url = url or text.strip()
             hostname = _hostname(resolved_url)
@@ -1461,7 +1466,9 @@ async def share_pending(token: str = Query(...)):
     entry = _pending_share.get(token)
     if not entry:
         raise HTTPException(status_code=404, detail="Token not found or expired")
-    note_id = entry["note_id"]
+    note_id = entry.get("note_id")
+    if not note_id:
+        raise HTTPException(status_code=404, detail="Token not found or expired")
     del _pending_share[token]
     return {"note_id": note_id, "status": "ready"}
 
@@ -1580,7 +1587,9 @@ def _build_user_manifest(share_key: str) -> dict:
             "title": "title",
             "text": "text",
             "url": "url",
-            "files": [{"name": "file", "accept": ["application/pdf"]}],
+            "files": [{"name": "file", "accept": [
+                "application/pdf", "image/jpeg", "image/png", "image/gif", "image/webp"
+            ]}],
         },
     }
     return manifest_data
