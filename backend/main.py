@@ -1566,7 +1566,15 @@ async def share_finalize(
 
 @app.get("/share-handler")
 async def share_handler():
-    return FileResponse(str(FRONTEND_DIR / "share.html"))
+    return FileResponse(str(FRONTEND_DIR / "share.html"),
+                        headers={"Cache-Control": "no-cache, no-store"})
+
+
+@app.get("/share.js", include_in_schema=False)
+async def share_js():
+    return FileResponse(str(FRONTEND_DIR / "share.js"),
+                        media_type="application/javascript; charset=utf-8",
+                        headers={"Cache-Control": "no-cache, no-store"})
 
 
 # ---------------------------------------------------------------------------
