@@ -1564,10 +1564,16 @@ async def share_finalize(
     return {"note_id": note_id, "att_id": att.id}
 
 
+_share_html_template = (FRONTEND_DIR / "share.html").read_text()
+
+
 @app.get("/share-handler")
 async def share_handler():
-    return FileResponse(str(FRONTEND_DIR / "share.html"),
-                        headers={"Cache-Control": "no-cache, no-store"})
+    html = _share_html_template.replace(
+        'src="/share.js"', f'src="/share.js?v={_app_version}"'
+    )
+    return Response(content=html, media_type="text/html",
+                    headers={"Cache-Control": "no-cache, no-store"})
 
 
 @app.get("/share.js", include_in_schema=False)
