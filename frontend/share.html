@@ -31,6 +31,55 @@
     p  { color: #6b7280; font-size: 14px; }
     a  { color: #4f46e5; }
     #error { display: none; }
+
+    /* Image pending UI */
+    #image-pending { display: none; width: 100%; max-width: 480px; }
+    #image-preview {
+      width: 100%; max-height: 300px;
+      object-fit: contain;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      background: #e5e7eb;
+    }
+    .btn-row {
+      display: flex; gap: 12px; justify-content: center;
+      margin-bottom: 20px;
+    }
+    .btn {
+      padding: 10px 20px;
+      border-radius: 8px;
+      border: none;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .btn-primary { background: #4f46e5; color: #fff; }
+    .btn-secondary { background: #e5e7eb; color: #111827; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    #note-search { display: none; width: 100%; text-align: left; }
+    #note-search-input {
+      width: 100%;
+      padding: 10px 12px;
+      font-size: 15px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      margin-bottom: 8px;
+      outline: none;
+    }
+    #note-search-input:focus { border-color: #4f46e5; }
+    #note-search-results { max-height: 260px; overflow-y: auto; }
+    .note-result {
+      padding: 10px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      text-align: left;
+      border-bottom: 1px solid #f3f4f6;
+    }
+    .note-result:hover { background: #f3f4f6; }
+    .note-result-empty { padding: 10px 12px; color: #9ca3af; font-size: 14px; }
+    #attach-status { font-size: 14px; color: #6b7280; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -42,6 +91,18 @@
   <div id="error">
     <h2>Something went wrong</h2>
     <p>Check the <a href="/">main app</a> — your note may still have been saved.</p>
+  </div>
+  <div id="image-pending">
+    <img id="image-preview" alt="Shared image" />
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-new-note">New Note</button>
+      <button class="btn btn-secondary" id="btn-attach">Attach to Note</button>
+    </div>
+    <div id="note-search">
+      <input id="note-search-input" type="search" placeholder="Search notes…" autocomplete="off" />
+      <div id="note-search-results"></div>
+    </div>
+    <div id="attach-status"></div>
   </div>
   <script src="/share.js"></script>
 </body>

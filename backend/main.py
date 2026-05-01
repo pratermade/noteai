@@ -488,7 +488,8 @@ def _purge_expired_shares() -> None:
     expired = [t for t, v in _pending_share.items() if v["expires_at"] < now]
     for t in expired:
         entry = _pending_share.pop(t)
-        pass
+        if entry.get("tmp_path"):
+            Path(entry["tmp_path"]).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1408,14 +1409,35 @@ async def share(
 
         if file and file.filename:
             mime = file.content_type or "application/pdf"
-            stem = Path(file.filename).stem.replace("_", " ").replace("-", " ")
-            note = await db.create_note(conn, user_id, stem, "", [], "shared", note_type='attachment')
             contents = await file.read()
             att_id = str(uuid.uuid4())
+
+            if mime.startswith("image/"):
+                # Store to temp; user picks note in share handler
+                ext = _IMAGE_EXT.get(mime, ".bin")
+                tmp_dir = ATTACHMENT_DIR / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                tmp_path = tmp_dir / f"{att_id}{ext}"
+                async with aiofiles.open(tmp_path, "wb") as f:
+                    await f.write(contents)
+                _purge_expired_shares()
+                _pending_share[token] = {
+                    "type": "image_pending",
+                    "user_id": user_id,
+                    "att_id": att_id,
+                    "filename": file.filename,
+                    "mime_type": mime,
+                    "tmp_path": str(tmp_path),
+                    "expires_at": expires,
+                }
+                return RedirectResponse(url=f"/share-handler?token={token}", status_code=302)
+
+            # PDF
+            stem = Path(file.filename).stem.replace("_", " ").replace("-", " ")
+            note = await db.create_note(conn, user_id, stem, "", [], "shared", note_type='attachment')
             note_dir = ATTACHMENT_DIR / note.id
             note_dir.mkdir(parents=True, exist_ok=True)
-            ext = _IMAGE_EXT.get(mime, ".pdf")
-            stored_filename = f"{att_id}{ext}"
+            stored_filename = f"{att_id}.pdf"
             stored_path = Path(note.id) / stored_filename
             full_path = ATTACHMENT_DIR / stored_path
             async with aiofiles.open(full_path, "wb") as f:
@@ -1425,14 +1447,9 @@ async def share(
                 mime_type=mime, size_bytes=len(contents),
                 stored_path=str(stored_path),
             )
-            if mime == "application/pdf":
-                background_tasks.add_task(
-                    _pdf_pipeline, att.id, note.id, str(full_path), file.filename, user_id
-                )
-            else:
-                background_tasks.add_task(
-                    _index_note, note.id, note.title, "", [], "shared", user_id
-                )
+            background_tasks.add_task(
+                _pdf_pipeline, att.id, note.id, str(full_path), file.filename, user_id
+            )
         elif url or text.strip().startswith(('http://', 'https://')):
             resolved_url = url or text.strip()
             hostname = _hostname(resolved_url)
@@ -1466,11 +1483,29 @@ async def share_pending(token: str = Query(...)):
     entry = _pending_share.get(token)
     if not entry:
         raise HTTPException(status_code=404, detail="Token not found or expired")
+    if entry.get("type") == "image_pending":
+        return {
+            "type": "image_pending",
+            "token": token,
+            "filename": entry["filename"],
+            "mime_type": entry["mime_type"],
+        }
     note_id = entry.get("note_id")
     if not note_id:
         raise HTTPException(status_code=404, detail="Token not found or expired")
     del _pending_share[token]
     return {"note_id": note_id, "status": "ready"}
+
+
+@app.get("/api/share/preview")
+async def share_preview(token: str = Query(...)):
+    entry = _pending_share.get(token)
+    if not entry or entry.get("type") != "image_pending":
+        raise HTTPException(status_code=404, detail="Not found")
+    tmp_path = Path(entry["tmp_path"])
+    if not tmp_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(str(tmp_path), media_type=entry["mime_type"])
 
 
 @app.post("/api/share/finalize")
