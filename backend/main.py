@@ -22,9 +22,12 @@ from fastapi import (
     Query, Request, UploadFile, status,
 )
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
-from .auth import CurrentUser, get_current_user, hash_password, verify_password, create_token
+from .auth import CurrentUser, decode_token, get_current_user, hash_password, verify_password, create_token
+
+_bearer = HTTPBearer(auto_error=False)
 from .config import settings
 from . import database as db
 from . import embeddings, vector_store, wyoming_client
@@ -59,6 +62,7 @@ _BASE_MANIFEST = {
     "name": "NoterAI",
     "short_name": "NoterAI",
     "start_url": "/",
+    "scope": "/",
     "display": "standalone",
     "background_color": "#ffffff",
     "theme_color": "#4f46e5",
@@ -340,14 +344,13 @@ async def _journal_pipeline(note_id: str, user_id: str = "") -> None:
             note = await db.get_note(conn, note_id)
             if not note or not note.content.strip():
                 return
-            rewritten = await _llm_journal_rewrite(note.content)
             title = note.title
             if not title or title.lower() in ("untitled", "shared note"):
                 title = f"Journal — {datetime.now(timezone.utc).strftime('%B %-d, %Y')}"
-            await db.update_note(conn, note_id, **{"title": title, "content": rewritten})
+            await db.update_note(conn, note_id, **{"title": title})
         await vector_store.delete_by_note_id(note_id)
-        await _index_note(note_id, title, rewritten, note.tags, "Journal", user_id=user_id)
-        logger.info("Journal rewrite complete for note %s", note_id)
+        await _index_note(note_id, title, note.content, note.tags, "Journal", user_id=user_id)
+        logger.info("Journal pipeline complete for note %s", note_id)
     except Exception:
         logger.warning("Journal pipeline failed for note %s", note_id, exc_info=True)
 
@@ -484,7 +487,9 @@ def _purge_expired_shares() -> None:
     now = datetime.now(timezone.utc)
     expired = [t for t, v in _pending_share.items() if v["expires_at"] < now]
     for t in expired:
-        del _pending_share[t]
+        entry = _pending_share.pop(t)
+        if entry.get("tmp_path"):
+            Path(entry["tmp_path"]).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -831,6 +836,9 @@ async def unshare_note(note_id: str, user_id: str, conn: DB, current_user: Curre
 # Attachments
 # ---------------------------------------------------------------------------
 
+_IMAGE_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp"}
+
+
 @app.post("/api/notes/{note_id}/attachments", response_model=AttachmentResponse, status_code=202)
 async def upload_attachment(
     note_id: str,
@@ -843,13 +851,13 @@ async def upload_attachment(
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
 
-    existing = await db.list_attachments(conn, note_id)
-    if existing:
-        raise HTTPException(status_code=400,
-                            detail="This note already has an attachment. Create a new note for additional content.")
+    mime = file.content_type or ""
+    if mime != "application/pdf" and not mime.startswith("image/"):
+        raise HTTPException(status_code=415, detail="Only PDF and image files are accepted")
 
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=415, detail="Only PDF files are accepted")
+    existing = await db.list_attachments(conn, note_id)
+    if mime == "application/pdf" and any(a.mime_type == "application/pdf" for a in existing):
+        raise HTTPException(status_code=400, detail="This note already has a PDF attachment.")
 
     MAX_SIZE = 50 * 1024 * 1024
     contents = await file.read(MAX_SIZE + 1)
@@ -859,22 +867,24 @@ async def upload_attachment(
     att_id = str(uuid.uuid4())
     note_dir = ATTACHMENT_DIR / note_id
     note_dir.mkdir(parents=True, exist_ok=True)
-    stored_filename = f"{att_id}.pdf"
+    ext = _IMAGE_EXT.get(mime, ".pdf")
+    stored_filename = f"{att_id}{ext}"
     stored_path = Path(note_id) / stored_filename
     full_path = ATTACHMENT_DIR / stored_path
 
     async with aiofiles.open(full_path, "wb") as f:
         await f.write(contents)
 
-    original_filename = file.filename or "attachment.pdf"
+    original_filename = file.filename or f"attachment{ext}"
     att = await db.create_attachment(
         conn, note_id=note_id, filename=original_filename,
-        mime_type="application/pdf", size_bytes=len(contents),
+        mime_type=mime, size_bytes=len(contents),
         stored_path=str(stored_path),
     )
-    background_tasks.add_task(
-        _pdf_pipeline, att.id, note_id, str(full_path), original_filename, current_user["id"]
-    )
+    if mime == "application/pdf":
+        background_tasks.add_task(
+            _pdf_pipeline, att.id, note_id, str(full_path), original_filename, current_user["id"]
+        )
     return att
 
 
@@ -887,21 +897,36 @@ async def list_attachments(note_id: str, conn: DB, current_user: CurrentUser):
 
 
 @app.get("/api/attachments/{att_id}/download")
-async def download_attachment(att_id: str, conn: DB, current_user: CurrentUser):
+async def download_attachment(
+    att_id: str,
+    conn: DB,
+    token: str | None = Query(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    from .auth import decode_token
+    raw = (credentials.credentials if credentials else None) or token
+    if not raw:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user_id = decode_token(raw)
+    async with conn.execute("SELECT id FROM users WHERE id = ?", (user_id,)) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(status_code=401, detail="User not found")
+
     att = await db.get_attachment(conn, att_id)
     if not att or not att.stored_path:
         raise HTTPException(status_code=404, detail="Attachment not found")
-    # Verify ownership via the note
-    note = await db.get_note(conn, att.note_id, user_id=current_user["id"])
+    note = await db.get_note(conn, att.note_id, user_id=user_id)
     if not note:
         raise HTTPException(status_code=404, detail="Attachment not found")
     full_path = ATTACHMENT_DIR / att.stored_path
     if not full_path.exists():
         raise HTTPException(status_code=404, detail="File not found on disk")
+    is_image = bool(att.mime_type and att.mime_type.startswith("image/"))
+    disposition = "inline" if is_image else f'attachment; filename="{att.filename}"'
     return FileResponse(
         path=str(full_path),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{att.filename}"'},
+        media_type=att.mime_type or "application/octet-stream",
+        headers={"Content-Disposition": disposition},
     )
 
 
@@ -1383,6 +1408,7 @@ async def share(
             return RedirectResponse(url="/share-handler?error=no_user", status_code=302)
 
         if file and file.filename:
+            mime = file.content_type or "application/pdf"
             stem = Path(file.filename).stem.replace("_", " ").replace("-", " ")
             note = await db.create_note(conn, user_id, stem, "", [], "shared", note_type='attachment')
             contents = await file.read()
@@ -1396,7 +1422,7 @@ async def share(
                 await f.write(contents)
             att = await db.create_attachment(
                 conn, note_id=note.id, filename=file.filename,
-                mime_type="application/pdf", size_bytes=len(contents),
+                mime_type=mime, size_bytes=len(contents),
                 stored_path=str(stored_path),
             )
             background_tasks.add_task(
@@ -1438,6 +1464,62 @@ async def share_pending(token: str = Query(...)):
     note_id = entry["note_id"]
     del _pending_share[token]
     return {"note_id": note_id, "status": "ready"}
+
+
+@app.post("/api/share/finalize")
+async def share_finalize(
+    request: Request,
+    conn: DB,
+    current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
+):
+    body = await request.json()
+    token = body.get("token")
+    action = body.get("action")
+    target_note_id = body.get("note_id")
+
+    _purge_expired_shares()
+    entry = _pending_share.get(token)
+    if not entry or entry.get("type") != "image_pending":
+        raise HTTPException(status_code=404, detail="Token not found or expired")
+    if entry["user_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    att_id    = entry["att_id"]
+    filename  = entry["filename"]
+    mime_type = entry["mime_type"]
+    tmp_path  = Path(entry["tmp_path"])
+    ext       = _IMAGE_EXT.get(mime_type, ".bin")
+
+    if action == "new":
+        stem = Path(filename).stem.replace("_", " ").replace("-", " ")
+        note = await db.create_note(conn, current_user["id"], stem, "", [], "shared",
+                                    note_type="attachment")
+        note_id = note.id
+    elif action == "attach":
+        if not target_note_id:
+            raise HTTPException(status_code=400, detail="note_id required for attach")
+        note = await db.get_note(conn, target_note_id, user_id=current_user["id"])
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        note_id = target_note_id
+    else:
+        raise HTTPException(status_code=400, detail="action must be 'new' or 'attach'")
+
+    note_dir = ATTACHMENT_DIR / note_id
+    note_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = note_dir / f"{att_id}{ext}"
+    tmp_path.rename(dest_path)
+    stored_path = str(Path(note_id) / f"{att_id}{ext}")
+
+    att = await db.create_attachment(
+        conn, note_id=note_id, filename=filename,
+        mime_type=mime_type, size_bytes=dest_path.stat().st_size,
+        stored_path=stored_path,
+    )
+
+    del _pending_share[token]
+    return {"note_id": note_id, "att_id": att.id}
 
 
 @app.get("/share-handler")
@@ -1516,7 +1598,8 @@ async def user_manifest_by_key(share_key: str, conn: DB):
     user = await db.get_user_by_share_key(conn, share_key)
     if not user:
         raise HTTPException(status_code=404)
-    return JSONResponse(content=_build_user_manifest(share_key), media_type="application/manifest+json")
+    return JSONResponse(content=_build_user_manifest(share_key), media_type="application/manifest+json",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/manifest", include_in_schema=False)
