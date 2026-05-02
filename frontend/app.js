@@ -286,9 +286,10 @@ function renderPreview() {
   notePreview.innerHTML = renderMarkdown(contentArea.value);
   notePreview.querySelectorAll('a').forEach(a => {
     const href = a.getAttribute('href') || '';
-    if (href.startsWith('#note:')) {
+    if (href.startsWith('#note/')) {
       a.addEventListener('click', e => {
         e.preventDefault();
+        e.stopPropagation();
         openNote(href.slice(6));
       });
     } else {
