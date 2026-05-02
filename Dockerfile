@@ -18,6 +18,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Append local CA certs to certifi's bundle so httpx trusts them
+RUN python3 -c "import certifi; print(certifi.where())" | \
+    xargs -I{} sh -c 'cat /usr/local/share/ca-certificates/*.crt >> {}'
+
 # Copy application code
 COPY backend/ backend/
 COPY frontend/ frontend/
