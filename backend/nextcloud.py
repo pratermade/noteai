@@ -49,8 +49,21 @@ class NextcloudClient:
                                         headers={"Depth": "0"})
         return r.status_code
 
-    async def mkcol(self, path: str) -> None:
-        r = await self._client.request("MKCOL", self._base + path)
+    async def mkcalendar(self, path: str, display_name: str) -> None:
+        body = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<C:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">'
+            "<D:set><D:prop>"
+            f"<D:displayname>{display_name}</D:displayname>"
+            "</D:prop></D:set>"
+            "</C:mkcalendar>"
+        )
+        r = await self._client.request(
+            "MKCALENDAR",
+            self._base + path,
+            content=body.encode(),
+            headers={"Content-Type": "application/xml; charset=utf-8"},
+        )
         r.raise_for_status()
 
     async def put(self, path: str, body: str) -> None:
@@ -122,7 +135,7 @@ async def ensure_calendars_exist(client: NextcloudClient, username: str,
             path = client._cal_path(cal)
             status = await client.propfind(path)
             if status == 404:
-                await client.mkcol(path)
+                await client.mkcalendar(path, cal)
                 logger.info("Created Nextcloud calendar: %s", cal)
         except Exception:
             logger.warning("ensure_calendars_exist failed for %s", cal, exc_info=True)
@@ -316,6 +329,7 @@ async def sync_user(user_id: str) -> None:
 
     client = NextcloudClient(url, username, password)
     try:
+        await ensure_calendars_exist(client, username, cal_name, tasks_cal_name)
         for note in notes:
             try:
                 uid = await push_note(client, note, username, cal_name, tasks_cal_name)
