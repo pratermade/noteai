@@ -41,6 +41,7 @@ from .models import (
 from .pdf_extractor import ExtractionError as PDFExtractionError, extract as pdf_extract
 from .web_extractor import ExtractionError as WebExtractionError, extract_url, get_youtube_video_id
 from .journal_log import journal_log_note
+from . import nextcloud as nc
 
 logger = logging.getLogger(__name__)
 
@@ -139,11 +140,113 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("SUMMARY_BASE_URL not set — summaries will use truncation fallback")
 
+    _nc_task = asyncio.create_task(_nc_scheduler_loop())
+
     yield
 
+    _nc_task.cancel()
     await embeddings.close_client()
     if _summary_client:
         await _summary_client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Nextcloud background helpers
+# ---------------------------------------------------------------------------
+
+async def _nc_scheduler_loop() -> None:
+    while True:
+        try:
+            await _nc_sync_all_users()
+        except Exception:
+            logger.warning("Nextcloud sync loop error", exc_info=True)
+        conn = await db.get_db()
+        try:
+            interval_raw = await db.get_setting(conn, "nextcloud_sync_interval_minutes")
+        finally:
+            await conn.close()
+        interval_minutes = int(interval_raw or "30")
+        await asyncio.sleep(interval_minutes * 60)
+
+
+async def _nc_sync_all_users() -> None:
+    conn = await db.get_db()
+    try:
+        url = await db.get_setting(conn, "nextcloud_url")
+        if not url:
+            return
+        async with conn.execute("SELECT id FROM users") as cur:
+            user_ids = [r[0] for r in await cur.fetchall()]
+    finally:
+        await conn.close()
+    for user_id in user_ids:
+        try:
+            await nc.sync_user(user_id)
+        except Exception:
+            logger.warning("Nextcloud sync failed for user %s", user_id, exc_info=True)
+
+
+async def _nc_push_note_bg(note_id: str, user_id: str) -> None:
+    client = await nc.get_user_client(user_id)
+    if not client:
+        return
+    conn = await db.get_db()
+    try:
+        async with conn.execute(
+            "SELECT id, title, content, folder, reminder_at, reminder_done, nextcloud_uid"
+            " FROM notes WHERE id = ?", (note_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return
+        note = dict(zip([d[0] for d in cur.description], row))
+        nc_username = await db.get_user_setting(conn, user_id, "nextcloud_username") or ""
+        cal = await db.get_user_setting(conn, user_id, "nextcloud_calendar_name") or "noterai"
+        tasks_cal = await db.get_user_setting(conn, user_id, "nextcloud_tasks_calendar_name") or "noterai-tasks"
+    finally:
+        await conn.close()
+    try:
+        uid = await nc.push_note(client, note, nc_username, cal, tasks_cal)
+        conn2 = await db.get_db()
+        try:
+            await db.set_note_nextcloud_uid(conn2, note_id, uid)
+        finally:
+            await conn2.close()
+    except Exception:
+        logger.warning("NC push failed for note %s", note_id, exc_info=True)
+    finally:
+        await client.aclose()
+
+
+async def _nc_delete_note_bg(note_id: str, user_id: str) -> None:
+    client = await nc.get_user_client(user_id)
+    if not client:
+        return
+    conn = await db.get_db()
+    try:
+        async with conn.execute(
+            "SELECT id, folder, nextcloud_uid FROM notes WHERE id = ?", (note_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return
+        note = dict(zip([d[0] for d in cur.description], row))
+        nc_username = await db.get_user_setting(conn, user_id, "nextcloud_username") or ""
+        cal = await db.get_user_setting(conn, user_id, "nextcloud_calendar_name") or "noterai"
+        tasks_cal = await db.get_user_setting(conn, user_id, "nextcloud_tasks_calendar_name") or "noterai-tasks"
+    finally:
+        await conn.close()
+    try:
+        await nc.delete_note_event(client, note, nc_username, cal, tasks_cal)
+        conn2 = await db.get_db()
+        try:
+            await db.set_note_nextcloud_uid(conn2, note_id, None)
+        finally:
+            await conn2.close()
+    except Exception:
+        logger.warning("NC delete failed for note %s", note_id, exc_info=True)
+    finally:
+        await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +675,8 @@ async def create_note(body: NoteCreate, conn: DB, background_tasks: BackgroundTa
         background_tasks.add_task(
             journal_log_note, note.id, note.title or "Untitled", note.folder, current_user["id"]
         )
+    if note.reminder_at:
+        background_tasks.add_task(_nc_push_note_bg, note.id, current_user["id"])
     return note
 
 
@@ -585,6 +690,14 @@ async def update_note(note_id: str, body: NoteUpdate, conn: DB,
     fields = {k: v for k, v in raw.items() if v is not None or k == "reminder_at"}
     # For list notes, access already verified via get_note (supports shared); skip user_id filter
     update_uid = None if existing.note_type == "list" else current_user["id"]
+    # Read existing nextcloud_uid before update (for delete trigger)
+    existing_nc_uid: str | None = None
+    if "reminder_at" in raw and raw.get("reminder_at") is None:
+        async with conn.execute(
+            "SELECT nextcloud_uid FROM notes WHERE id = ?", (note_id,)
+        ) as cur:
+            nc_row = await cur.fetchone()
+        existing_nc_uid = nc_row[0] if nc_row else None
     note = await db.update_note(conn, note_id, user_id=update_uid, **fields)
     if note.note_type == "list":
         await db.set_note_indexed(conn, note_id)
@@ -601,6 +714,14 @@ async def update_note(note_id: str, body: NoteUpdate, conn: DB,
                 _index_note, note.id, note.title, note.content, note.tags, note.folder,
                 current_user["id"]
             )
+    if "reminder_at" in raw:
+        if note.reminder_at:
+            background_tasks.add_task(_nc_push_note_bg, note.id, current_user["id"])
+        elif existing_nc_uid:
+            background_tasks.add_task(_nc_delete_note_bg, note.id, current_user["id"])
+    elif "reminder_done" in raw and note.reminder_at:
+        # done toggled — re-push so STATUS:COMPLETED is synced
+        background_tasks.add_task(_nc_push_note_bg, note.id, current_user["id"])
     return note
 
 
@@ -1144,6 +1265,9 @@ async def _build_settings_response(conn, user_id: str) -> SettingsResponse:
 
     tz = await _get_u("server_timezone") or os.environ.get("TZ", "")
 
+    nc_lookahead_raw = await db.get_setting(conn, "nextcloud_rag_lookahead_days")
+    nc_interval_raw = await db.get_setting(conn, "nextcloud_sync_interval_minutes")
+
     return SettingsResponse(
         server_timezone=tz,
         reminder_times=times,
@@ -1157,6 +1281,13 @@ async def _build_settings_response(conn, user_id: str) -> SettingsResponse:
         character_prompt=await _get_u("character_prompt"),
         telegram_bot_user_id=await _get_g("bot_user_id"),
         telegram_user_id=await _get_tg("telegram_user_id"),
+        nextcloud_url=await _get_g("nextcloud_url") or "",
+        nextcloud_username=await _get_u("nextcloud_username"),
+        nextcloud_app_password=await _get_u("nextcloud_app_password"),
+        nextcloud_calendar_name=await _get_u("nextcloud_calendar_name") or "noterai",
+        nextcloud_tasks_calendar_name=await _get_u("nextcloud_tasks_calendar_name") or "noterai-tasks",
+        nextcloud_rag_lookahead_days=int(nc_lookahead_raw or "7"),
+        nextcloud_sync_interval_minutes=int(nc_interval_raw or "30"),
     )
 
 
@@ -1213,7 +1344,46 @@ async def update_settings(body: SettingsPatch, conn: DB, current_user: CurrentUs
         await db.set_setting(conn, "bot_user_id", body.telegram_bot_user_id)
     if body.telegram_user_id is not None:
         await db.set_user_setting(conn, uid, "telegram_user_id", body.telegram_user_id)
+    # Nextcloud global settings
+    if body.nextcloud_url is not None:
+        await db.set_setting(conn, "nextcloud_url", body.nextcloud_url)
+    if body.nextcloud_rag_lookahead_days is not None:
+        await db.set_setting(conn, "nextcloud_rag_lookahead_days",
+                             str(body.nextcloud_rag_lookahead_days))
+    if body.nextcloud_sync_interval_minutes is not None:
+        await db.set_setting(conn, "nextcloud_sync_interval_minutes",
+                             str(body.nextcloud_sync_interval_minutes))
+    # Nextcloud per-user settings
+    if body.nextcloud_username is not None:
+        await db.set_user_setting(conn, uid, "nextcloud_username", body.nextcloud_username)
+    if body.nextcloud_app_password is not None:
+        await db.set_user_setting(conn, uid, "nextcloud_app_password", body.nextcloud_app_password)
+    if body.nextcloud_calendar_name is not None:
+        await db.set_user_setting(conn, uid, "nextcloud_calendar_name", body.nextcloud_calendar_name)
+    if body.nextcloud_tasks_calendar_name is not None:
+        await db.set_user_setting(conn, uid, "nextcloud_tasks_calendar_name",
+                                  body.nextcloud_tasks_calendar_name)
     return await _build_settings_response(conn, uid)
+
+
+@app.post("/api/nextcloud/test")
+async def test_nextcloud(conn: DB, current_user: CurrentUser):
+    uid = current_user["id"]
+    client = await nc.get_user_client(uid)
+    if not client:
+        raise HTTPException(status_code=400, detail="Nextcloud not configured")
+    try:
+        nc_username = await db.get_user_setting(conn, uid, "nextcloud_username") or ""
+        status_code = await client.propfind(f"/remote.php/dav/calendars/{nc_username}/")
+        await client.aclose()
+        if status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"Nextcloud returned {status_code}")
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 @app.post("/api/settings/test-telegram")

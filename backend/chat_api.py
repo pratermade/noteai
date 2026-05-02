@@ -21,6 +21,7 @@ from .chunker import chunk_text
 from .config import settings
 from .journal_log import journal_log_note
 from .models import FOLDERS
+from . import nextcloud as nc
 
 logger = logging.getLogger(__name__)
 
@@ -1394,6 +1395,12 @@ async def chat_completions(body: ChatRequest):
         _no_reminders() if body.skip_reminders else _get_due_reminders(body.user_id),
         _get_character_prompt(body.user_id),
     )
+    # Append cached Nextcloud events to system prompt (no I/O)
+    if body.user_id:
+        nc_events = nc.get_cached_events(body.user_id)
+        if nc_events:
+            lines = "\n".join(f"{e['date']}  {e['title']}" for e in nc_events[:20])
+            reminders_text = (reminders_text or "") + f"\n\n--- Upcoming calendar events ---\n{lines}"
     reminders_md = _format_reminders_md(reminders_list)
     messages = _build_messages([m.model_dump() for m in body.messages], context, reminders_text, character_prompt)
 

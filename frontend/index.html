@@ -271,6 +271,43 @@
           <button id="btn-test-telegram" class="btn-secondary">Test Connection</button>
         </div>
       </section>
+      <section class="settings-section">
+        <h2>Nextcloud Calendar</h2>
+        <p class="settings-hint">Syncs notes with due dates to your Nextcloud calendar via CalDAV. Notes in the Todo folder sync as tasks; all others sync as events.</p>
+        <div class="settings-fields">
+          <div class="settings-field">
+            <label>Nextcloud URL</label>
+            <input id="nc-url" type="text" placeholder="https://cloud.example.com" autocomplete="off" />
+          </div>
+          <div class="settings-field">
+            <label>Username</label>
+            <input id="nc-username" type="text" autocomplete="off" />
+          </div>
+          <div class="settings-field">
+            <label>App Password</label>
+            <input id="nc-app-password" type="password" autocomplete="new-password" />
+          </div>
+          <div class="settings-field">
+            <label>Calendar Name <span class="settings-hint-inline">(default: noterai)</span></label>
+            <input id="nc-calendar-name" type="text" placeholder="noterai" autocomplete="off" />
+          </div>
+          <div class="settings-field">
+            <label>Tasks Calendar Name <span class="settings-hint-inline">(default: noterai-tasks)</span></label>
+            <input id="nc-tasks-calendar-name" type="text" placeholder="noterai-tasks" autocomplete="off" />
+          </div>
+          <div class="settings-field">
+            <label>RAG Lookahead Days</label>
+            <input id="nc-lookahead-days" type="number" min="1" max="90" placeholder="7" />
+          </div>
+          <div class="settings-field">
+            <label>Sync Interval (minutes)</label>
+            <input id="nc-sync-interval" type="number" min="5" max="1440" placeholder="30" />
+          </div>
+        </div>
+        <div class="settings-section-footer">
+          <button id="btn-test-nextcloud" class="btn-secondary">Test Connection</button>
+        </div>
+      </section>
       <div class="settings-actions">
         <button id="btn-settings-save">Save Settings</button>
       </div>

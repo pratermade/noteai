@@ -108,6 +108,7 @@ async def init_db(db: aiosqlite.Connection) -> None:
         ("reminder_at", "TEXT"),
         ("reminder_done", "INTEGER NOT NULL DEFAULT 0"),
         ("user_id", "TEXT REFERENCES users(id)"),
+        ("nextcloud_uid", "TEXT"),
     ]:
         if col not in note_cols:
             await db.execute(f"ALTER TABLE notes ADD COLUMN {col} {definition}")
@@ -532,6 +533,12 @@ async def set_user_setting(db: aiosqlite.Connection, user_id: str, key: str,
         " ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
         (user_id, key, value),
     )
+    await db.commit()
+
+
+async def set_note_nextcloud_uid(db: aiosqlite.Connection, note_id: str,
+                                  uid: str | None) -> None:
+    await db.execute("UPDATE notes SET nextcloud_uid = ? WHERE id = ?", (uid, note_id))
     await db.commit()
 
 

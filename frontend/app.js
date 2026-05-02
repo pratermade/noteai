@@ -1541,6 +1541,13 @@ async function loadSettings() {
     $('tg-my-user-id').value        = data.telegram_user_id || '';
     $('character-prompt').value     = data.character_prompt || '';
     $('server-timezone').value      = data.server_timezone || '';
+    $('nc-url').value               = data.nextcloud_url || '';
+    $('nc-username').value          = data.nextcloud_username || '';
+    $('nc-app-password').value      = data.nextcloud_app_password || '';
+    $('nc-calendar-name').value     = data.nextcloud_calendar_name || '';
+    $('nc-tasks-calendar-name').value = data.nextcloud_tasks_calendar_name || '';
+    $('nc-lookahead-days').value    = data.nextcloud_rag_lookahead_days || '';
+    $('nc-sync-interval').value     = data.nextcloud_sync_interval_minutes || '';
     const botUserSel = $('tg-bot-user');
     botUserSel.innerHTML = users.map(u =>
       `<option value="${u.id}"${u.id === data.telegram_bot_user_id ? ' selected' : ''}>${u.username}</option>`
@@ -1595,6 +1602,13 @@ $('btn-settings-save').addEventListener('click', async () => {
     character_prompt: $('character-prompt').value.trim() || undefined,
     telegram_bot_user_id: $('tg-bot-user').value || undefined,
     telegram_user_id: $('tg-my-user-id').value.trim() || undefined,
+    nextcloud_url: $('nc-url').value.trim() || undefined,
+    nextcloud_username: $('nc-username').value.trim() || undefined,
+    nextcloud_app_password: $('nc-app-password').value.trim() || undefined,
+    nextcloud_calendar_name: $('nc-calendar-name').value.trim() || undefined,
+    nextcloud_tasks_calendar_name: $('nc-tasks-calendar-name').value.trim() || undefined,
+    nextcloud_rag_lookahead_days: parseInt($('nc-lookahead-days').value) || undefined,
+    nextcloud_sync_interval_minutes: parseInt($('nc-sync-interval').value) || undefined,
   };
   // Drop undefined keys so PATCH treats them as "don't change"
   Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
@@ -1664,6 +1678,21 @@ if (cpChangeBtn) cpChangeBtn.addEventListener('click', async () => {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Change Password';
+  }
+});
+
+$('btn-test-nextcloud').addEventListener('click', async () => {
+  const btn = $('btn-test-nextcloud');
+  btn.disabled = true;
+  btn.textContent = 'Testing…';
+  try {
+    await apiFetch('/api/nextcloud/test', { method: 'POST' });
+    toast('Nextcloud connection successful.', 'success');
+  } catch (e) {
+    toast('Nextcloud test failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Test Connection';
   }
 });
 

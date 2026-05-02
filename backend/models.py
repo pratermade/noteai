@@ -118,6 +118,13 @@ class SettingsPatch(BaseModel):
     character_prompt: str | None = None
     telegram_bot_user_id: str | None = None
     telegram_user_id: str | None = None
+    nextcloud_url: str | None = None
+    nextcloud_username: str | None = None
+    nextcloud_app_password: str | None = None
+    nextcloud_calendar_name: str | None = None
+    nextcloud_tasks_calendar_name: str | None = None
+    nextcloud_rag_lookahead_days: int | None = None
+    nextcloud_sync_interval_minutes: int | None = None
 
 
 class SettingsResponse(BaseModel):
@@ -133,6 +140,13 @@ class SettingsResponse(BaseModel):
     character_prompt: str
     telegram_bot_user_id: str
     telegram_user_id: str
+    nextcloud_url: str = ""
+    nextcloud_username: str = ""
+    nextcloud_app_password: str = ""
+    nextcloud_calendar_name: str = "noterai"
+    nextcloud_tasks_calendar_name: str = "noterai-tasks"
+    nextcloud_rag_lookahead_days: int = 7
+    nextcloud_sync_interval_minutes: int = 30
 
 
 class LoginRequest(BaseModel):
