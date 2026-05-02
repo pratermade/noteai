@@ -42,6 +42,9 @@ _DEFAULT_CHARACTER_PROMPT = (
 # chat_id -> list of {"role": "user"|"assistant", "content": str}
 conversations: dict[int, list[dict]] = {}
 
+# token (first 10 chars) -> owner NoterAI user_id — populated in main() before bots start
+_bot_owner_map: dict[str, str] = {}
+
 _TELEGRAM_LIMIT = 4096
 
 
@@ -137,7 +140,7 @@ async def _get_allowed_users_for_bot(owner_user_id: str | None) -> set[int]:
 def restricted(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        owner_user_id = context.application.bot_data.get("owner_user_id")
+        owner_user_id = _bot_owner_map.get(context.bot.token)
         allowed = await _get_allowed_users_for_bot(owner_user_id)
         if update.effective_user and update.effective_user.id not in allowed:
             await update.message.reply_text("Not authorized.")
@@ -235,7 +238,7 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 @restricted
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    owner_user_id = context.application.bot_data.get("owner_user_id")
+    owner_user_id = _bot_owner_map.get(context.bot.token)
     rag_url = await _get_user_setting(owner_user_id, "telegram_rag_url", TELEGRAM_RAG_URL) if owner_user_id else TELEGRAM_RAG_URL
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -253,7 +256,7 @@ async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 @restricted
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.chat.send_action(ChatAction.TYPING)
-    owner_user_id = context.application.bot_data.get("owner_user_id")
+    owner_user_id = _bot_owner_map.get(context.bot.token)
     telegram_sender_id = update.effective_user.id if update.effective_user else None
     user_id = None
     if telegram_sender_id:
@@ -268,7 +271,8 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user_text = update.message.text
-    owner_user_id = context.application.bot_data.get("owner_user_id")
+    owner_user_id = _bot_owner_map.get(context.bot.token)
+    logger.info("handle_message: bot=%s owner_user_id=%s", context.bot.token[:10], owner_user_id)
 
     telegram_sender_id = update.effective_user.id if update.effective_user else None
     notera_user_id = None
@@ -588,9 +592,11 @@ async def _reschedule_journal_for_user(bot, user_id: str, scheduler: AsyncIOSche
 
 def make_post_init(owner_user_id: str):
     async def _post_init(application) -> None:
+        logger.info("post_init: owner_user_id=%s bot=%s", owner_user_id, application.bot.token[:10])
         scheduler = AsyncIOScheduler()
         application.bot_data["owner_user_id"] = owner_user_id
         application.bot_data["scheduler"] = scheduler
+        logger.info("post_init: bot_data set for user=%s", owner_user_id)
         tz = await _get_timezone(owner_user_id)
         scheduler.add_job(
             _reschedule_reminders_for_user,
@@ -628,6 +634,9 @@ def _add_handlers(app) -> None:
 
 async def _run_app(app) -> None:
     async with app:
+        # In PTB v20+, post_init is only called by run_polling/run_webhook, not initialize()
+        if app.post_init:
+            await app.post_init(app)
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         await asyncio.sleep(float("inf"))
@@ -641,10 +650,11 @@ async def main() -> None:
 
     apps = []
     for owner_user_id, token in tokens:
+        _bot_owner_map[token] = owner_user_id
         app = ApplicationBuilder().token(token).post_init(make_post_init(owner_user_id)).build()
         _add_handlers(app)
         apps.append(app)
-        logger.info("Built bot for user %s", owner_user_id)
+        logger.info("Built bot for user %s token=%s", owner_user_id, token[:10])
 
     logger.info("Starting %d bot(s)", len(apps))
     async with asyncio.TaskGroup() as tg:
