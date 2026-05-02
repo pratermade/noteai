@@ -4,17 +4,19 @@ A self-hosted note-keeping PWA with automatic RAG pipeline. Notes, PDFs, and web
 
 ## Features
 
-- **Four note types**: `markdown` (plain notes), `attachment` (PDF), `url` (web page), `video` (YouTube — embeds player and indexes transcript)
-- **Nine folders** — fixed categories (Unfiled, Reference, Ideas, Todo, Review Later, Projects, Journal, Resources, Archive) to keep notes organized; Archive is excluded from search and RAG by default
+- **Five note types**: `markdown` (plain notes), `list` (collaborative checklist), `attachment` (PDF/image), `url` (web page), `video` (YouTube — embeds player and indexes transcript)
+- **Nine folders** — fixed categories (Unfiled, Reference, Ideas, Todo, Review Later, Projects, Journal, Lists, Archive) to keep notes organized; Archive is excluded from search and RAG by default
+- **Collaborative lists** — `list` notes have per-item checkboxes, real-time polling, and per-note sharing with other users; shared lists are visible to collaborators without full account access
+- **Journal auto-logging** — every new note (from web UI, Telegram bot, or Android share) is automatically linked in today's journal entry with a timestamped clickable link; a journal entry is created if none exists for the day
 - **Voice dictation** — tap the 🎤 button to record a journal entry; the audio is transcribed by a local Whisper server and automatically rewritten into a structured, clinical journal format via the LLM pipeline
 - **Semantic search** across notes and attachment content
 - **LLM summaries** — auto-generated 50-word summary for every note and attachment
 - **RAG chat API** — OpenAI-compatible `/v1/chat/completions` endpoint (port 8084) that answers questions grounded in your notes, with intent-based folder routing (e.g. "what should I work on?" searches only Todo notes) and daily reminder injection
 - **Date reminders** — set a due date on any note; the RAG chat surfaces overdue and due-today reminders on every message with direct links; mark done or snooze to a new date from the note editor
 - **Next Tasks panel** — sidebar shortcut listing the next 10 notes with due dates ordered soonest first; inline checkboxes mark tasks complete without leaving the view
-- **Android PWA** — installable, with share-target support (share URLs, text, and PDFs directly from Chrome)
-- **Markdown preview** with edit/preview toggle
-- **Telegram bot** — conversational RAG over your notes via Telegram; sends scheduled task reminders and journal nudges at configurable times; bot credentials and reminder schedules managed entirely from the web UI (no `.env` edits required)
+- **Android PWA** — installable, with share-target support (share URLs, text, PDFs, and images directly from Chrome); shared images can be attached to an existing note or saved as a new one
+- **Markdown preview** with edit/preview toggle; internal note links in journal entries open the linked note directly
+- **Telegram bot** — conversational RAG over your notes via Telegram; sends scheduled task reminders and journal nudges at configurable times; each user can configure their own bot token so multiple household members run independent bots; credentials and reminder schedules managed entirely from the web UI (no `.env` edits required)
 
 ## Prerequisites
 
@@ -194,21 +196,22 @@ Install the mkcert root CA on your Android device to trust the certificate.
 1. **Log in first** — the share target is registered per-user. You must be logged in before installing so Chrome captures the correct per-user manifest.
 2. Open the app URL in Chrome on your Android device.
 3. Tap the three-dot menu → **Add to Home Screen**.
-4. Once installed, NoterAI appears in the Android share sheet — you can share URLs, text, and PDFs directly from any app.
+4. Once installed, NoterAI appears in the Android share sheet — you can share URLs, text, PDFs, and images directly from any app. When sharing an image you'll be prompted to attach it to an existing note or create a new one.
 
 > **Note — share target not appearing?** If you installed the PWA before logging in (or before the multi-user update), the registered manifest has no `share_target`. Uninstall the PWA from Android (long-press icon → Uninstall), log in via Chrome, then reinstall. Chrome must read the manifest *at install time* to register the share target; updating the installed app's manifest after the fact is unreliable across Chrome versions.
 
 ## Telegram Bot
 
-NoterAI includes an optional Telegram bot that connects to the RAG chat API so you can query your notes from your phone.
+NoterAI includes an optional Telegram bot that connects to the RAG chat API so you can query your notes from your phone. Each NoterAI user can configure their own independent bot token — multiple household members can each have a separate bot that searches only their own notes.
 
 ### Setup
 
 1. Create a bot via [@BotFather](https://t.me/botfather) and copy the token.
 2. Open **Settings** in the web UI and fill in the **Telegram Bot** section:
-   - **Bot Token** — token from BotFather
+   - **Bot Token** — token from BotFather (each user sets their own)
    - **Allowed User IDs** — your Telegram numeric user ID (use `/chatid` in the bot once it's running, or check [@userinfobot](https://t.me/userinfobot))
    - **Reminder Chat ID** — the chat where reminders are sent (usually your own user ID)
+   - **My Telegram User ID** — links your Telegram account to your NoterAI account so the bot saves notes and journal entries under your user
    - **RAG API URL** — URL of the RAG chat service (default `http://localhost:8084`)
 3. Click **Test Connection** to verify the token is valid, then **Save Settings**.
 4. Restart the container (`bash update.sh`) to pick up the new credentials.
@@ -220,8 +223,15 @@ NoterAI includes an optional Telegram bot that connects to the RAG chat API so y
 | `/start` | Show help |
 | `/clear` | Reset conversation history |
 | `/status` | Check RAG API health |
-| `/chatid` | Show your chat ID |
+| `/chatid` | Show your Telegram user ID |
 | `/remind` | Trigger a task reminder immediately (for testing) |
+
+### Chat shortcuts
+
+Beyond normal RAG questions, the bot recognizes two keyword prefixes:
+
+- **`remember <text>`** — saves the text as a new Reference note immediately, without an LLM round-trip. Also logs the note in today's journal.
+- **`lookup <query>`** — skips folder classification and searches all non-Archive notes directly.
 
 ### Scheduled reminders
 
