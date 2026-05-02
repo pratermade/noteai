@@ -284,18 +284,9 @@ function renderMarkdown(content) {
 
 function renderPreview() {
   notePreview.innerHTML = renderMarkdown(contentArea.value);
-  notePreview.querySelectorAll('a').forEach(a => {
-    const href = a.getAttribute('href') || '';
-    if (href.startsWith('#note/')) {
-      a.addEventListener('click', e => {
-        e.preventDefault();
-        e.stopPropagation();
-        openNote(href.slice(6));
-      });
-    } else {
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-    }
+  notePreview.querySelectorAll('a:not([href^="#note/"])').forEach(a => {
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
   });
 }
 
@@ -1359,7 +1350,15 @@ $('btn-tasks').addEventListener('click', openTasksPanel);
 $('btn-save').addEventListener('click', saveNote);
 $('btn-home').addEventListener('click', closeEditor);
 $('btn-refresh').addEventListener('click', loadNotes);
-notePreview.addEventListener('click', () => setEditMode(true));
+notePreview.addEventListener('click', e => {
+  const link = e.target.closest('a[href^="#note/"]');
+  if (link) {
+    e.preventDefault();
+    openNote(link.getAttribute('href').slice(6));
+    return;
+  }
+  setEditMode(true);
+});
 btnEditToggle.addEventListener('click', () => setEditMode(!state.editMode));
 
 document.addEventListener('keydown', e => {
