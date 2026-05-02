@@ -40,6 +40,7 @@ from .models import (
 )
 from .pdf_extractor import ExtractionError as PDFExtractionError, extract as pdf_extract
 from .web_extractor import ExtractionError as WebExtractionError, extract_url, get_youtube_video_id
+from .journal_log import journal_log_note
 
 logger = logging.getLogger(__name__)
 
@@ -355,59 +356,6 @@ async def _journal_pipeline(note_id: str, user_id: str = "") -> None:
         logger.warning("Journal pipeline failed for note %s", note_id, exc_info=True)
 
 
-async def _journal_log_note(note_id: str, note_title: str, note_folder: str, user_id: str) -> None:
-    """Append a timestamped reference to a newly-created note in today's journal entry."""
-    try:
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-        async with aiosqlite.connect(settings.database_url) as conn:
-            conn.row_factory = aiosqlite.Row
-            async with conn.execute(
-                "SELECT value FROM user_settings WHERE user_id = ? AND key = 'server_timezone'",
-                (user_id,),
-            ) as cur:
-                tz_row = await cur.fetchone()
-        tz_str = (tz_row[0].strip() if tz_row and tz_row[0] else "") or os.environ.get("TZ", "")
-        try:
-            tz = ZoneInfo(tz_str) if tz_str else None
-        except ZoneInfoNotFoundError:
-            tz = None
-
-        now = datetime.now(tz) if tz else datetime.now(timezone.utc)
-        journal_title = f"Journal — {now.strftime('%B %-d, %Y')}"
-        time_str = now.strftime("%H:%M")
-        new_line = f"- {time_str} — Added [**{note_title}**](#note/{note_id}) *({note_folder})*"
-
-        async with aiosqlite.connect(settings.database_url) as conn:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("PRAGMA foreign_keys = ON")
-            async with conn.execute(
-                "SELECT id, content FROM notes WHERE user_id = ? AND folder = 'Journal' AND title = ?"
-                " ORDER BY created_at DESC LIMIT 1",
-                (user_id, journal_title),
-            ) as cur:
-                row = await cur.fetchone()
-
-            if row:
-                journal_id = row["id"]
-                new_content = (row["content"] or "").rstrip() + "\n" + new_line
-                await conn.execute(
-                    "UPDATE notes SET content = ?, updated_at = ? WHERE id = ?",
-                    (new_content, datetime.now(timezone.utc).isoformat(), journal_id),
-                )
-                await conn.commit()
-                await vector_store.delete_by_note_id(journal_id)
-                await _index_note(journal_id, journal_title, new_content, [], "Journal", user_id=user_id)
-            else:
-                initial_content = f"## Notes\n\n{new_line}"
-                journal_note = await db.create_note(
-                    conn, user_id, journal_title, initial_content, [], "Journal"
-                )
-                await _index_note(journal_note.id, journal_title, initial_content, [], "Journal", user_id=user_id)
-
-        logger.info("Journal log: note %s (%r) recorded for user %s", note_id, note_title, user_id)
-    except Exception:
-        logger.warning("Journal log failed for note %s", note_id, exc_info=True)
-
 
 async def _backfill_summaries(rows: list[tuple[str, str]]) -> None:
     logger.info("Starting LLM summary backfill for %d attachment(s)...", len(rows))
@@ -622,7 +570,7 @@ async def create_note(body: NoteCreate, conn: DB, background_tasks: BackgroundTa
         )
     if note.folder not in ("Journal", "Archive"):
         background_tasks.add_task(
-            _journal_log_note, note.id, note.title or "Untitled", note.folder, current_user["id"]
+            journal_log_note, note.id, note.title or "Untitled", note.folder, current_user["id"]
         )
     return note
 
@@ -1508,6 +1456,7 @@ async def share(
             background_tasks.add_task(
                 _pdf_pipeline, att.id, note.id, str(full_path), file.filename, user_id
             )
+            background_tasks.add_task(journal_log_note, note.id, note.title, "shared", user_id)
         elif url or text.strip().startswith(('http://', 'https://')):
             resolved_url = url or text.strip()
             hostname = _hostname(resolved_url)
@@ -1522,12 +1471,14 @@ async def share(
                 mime_type=mime_type, size_bytes=0, source_url=resolved_url,
             )
             background_tasks.add_task(_web_pipeline, att.id, note.id, resolved_url, user_id)
+            background_tasks.add_task(journal_log_note, note.id, note_title, "shared", user_id)
         else:
             note_title = title[:80].strip() or "Shared note"
             note = await db.create_note(conn, user_id, note_title, text, [], "shared")
             background_tasks.add_task(
                 _index_note, note.id, note.title, note.content, note.tags, note.folder, user_id
             )
+            background_tasks.add_task(journal_log_note, note.id, note_title, "shared", user_id)
 
     _purge_expired_shares()
     _pending_share[token] = {"note_id": note.id, "expires_at": expires}
@@ -1596,6 +1547,7 @@ async def share_finalize(
         note = await db.create_note(conn, current_user["id"], stem, "", [], "shared",
                                     note_type="attachment")
         note_id = note.id
+        background_tasks.add_task(journal_log_note, note_id, stem, "shared", current_user["id"])
     elif action == "attach":
         if not target_note_id:
             raise HTTPException(status_code=400, detail="note_id required for attach")
