@@ -102,64 +102,66 @@
       <button id="btn-delete" title="Delete note">Delete</button>
       <button id="btn-save">Save</button>
     </div>
-    <div id="editor-meta">
-      <div class="meta-field">
-        <label>Folder</label>
-        <select id="folder-input">
-          <option value="Unfiled">Unfiled</option>
-          <option value="Reference">Reference</option>
-          <option value="Todo">Todo</option>
-          <option value="Journal">Journal</option>
-          <option value="Lists">Lists</option>
-          <option value="Archive">Archive</option>
-        </select>
+    <div id="editor-scroll-body">
+      <div id="editor-meta">
+        <div class="meta-field">
+          <label>Folder</label>
+          <select id="folder-input">
+            <option value="Unfiled">Unfiled</option>
+            <option value="Reference">Reference</option>
+            <option value="Todo">Todo</option>
+            <option value="Journal">Journal</option>
+            <option value="Lists">Lists</option>
+            <option value="Archive">Archive</option>
+          </select>
+        </div>
+        <div class="meta-field">
+          <label>Reminder</label>
+          <input type="date" id="reminder-date-input" />
+          <input type="time" id="reminder-time-input" placeholder="08:00" />
+          <button id="btn-reminder-done" style="display:none">✓ Done</button>
+        </div>
+        <div class="meta-field">
+          <label>Tags</label>
+          <div id="tags-container">
+            <div id="tag-chips"></div>
+            <input id="tag-input" type="text" placeholder="add tag, press Enter" />
+          </div>
+        </div>
       </div>
-      <div class="meta-field">
-        <label>Reminder</label>
-        <input type="date" id="reminder-date-input" />
-        <input type="time" id="reminder-time-input" placeholder="08:00" />
-        <button id="btn-reminder-done" style="display:none">✓ Done</button>
+      <div id="note-summary-section" style="display:none"></div>
+      <!-- List items section (visible for list notes) -->
+      <div id="list-items-section" style="display:none">
+        <div id="list-items-container"></div>
+        <div id="list-item-input-row">
+          <input id="list-item-input" type="text" placeholder="Add item, press Enter…" autocomplete="off" />
+          <button id="btn-add-list-item">+ Add</button>
+        </div>
       </div>
-      <div class="meta-field">
-        <label>Tags</label>
-        <div id="tags-container">
-          <div id="tag-chips"></div>
-          <input id="tag-input" type="text" placeholder="add tag, press Enter" />
+      <!-- Share section (visible for list notes) -->
+      <div id="list-share-section" style="display:none">
+        <div class="meta-field">
+          <label>Shared with</label>
+          <div id="list-share-users"></div>
+        </div>
+      </div>
+      <div id="video-embed" style="display:none">
+        <div class="video-embed-wrap">
+          <iframe id="video-iframe" frameborder="0" allowfullscreen
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture">
+          </iframe>
+        </div>
+      </div>
+      <div id="note-preview"></div>
+      <textarea id="note-content" placeholder="Write in markdown…"></textarea>
+      <div id="attachments-section">
+        <div id="attachment-list"></div>
+        <div id="drop-zone">
+          Drop a PDF or image here or <u>click to choose</u>
+          <input type="file" id="file-input" accept="application/pdf,image/*" />
         </div>
       </div>
     </div>
-    <div id="note-summary-section" style="display:none"></div>
-    <!-- List items section (visible for list notes) -->
-    <div id="list-items-section" style="display:none">
-      <div id="list-items-container"></div>
-      <div id="list-item-input-row">
-        <input id="list-item-input" type="text" placeholder="Add item, press Enter…" autocomplete="off" />
-        <button id="btn-add-list-item">+ Add</button>
-      </div>
-    </div>
-    <!-- Share section (visible for list notes) -->
-    <div id="list-share-section" style="display:none">
-      <div class="meta-field">
-        <label>Shared with</label>
-        <div id="list-share-users"></div>
-      </div>
-    </div>
-    <div id="attachments-section">
-      <div id="drop-zone">
-        Drop a PDF here or <u>click to choose</u>
-        <input type="file" id="file-input" accept="application/pdf" />
-      </div>
-      <div id="attachment-list"></div>
-    </div>
-    <div id="video-embed" style="display:none">
-      <div class="video-embed-wrap">
-        <iframe id="video-iframe" frameborder="0" allowfullscreen
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture">
-        </iframe>
-      </div>
-    </div>
-    <div id="note-preview"></div>
-    <textarea id="note-content" placeholder="Write in markdown…"></textarea>
   </div>
 
   <!-- Settings view -->
