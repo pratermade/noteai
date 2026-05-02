@@ -375,7 +375,7 @@ async def _journal_log_note(note_id: str, note_title: str, note_folder: str, use
         now = datetime.now(tz) if tz else datetime.now(timezone.utc)
         journal_title = f"Journal — {now.strftime('%B %-d, %Y')}"
         time_str = now.strftime("%H:%M")
-        new_line = f"- {time_str} — Added **{note_title}** *({note_folder})*"
+        new_line = f"- {time_str} — Added [**{note_title}**](#note:{note_id}) *({note_folder})*"
 
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
