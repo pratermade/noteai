@@ -5,7 +5,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libmupdf-dev \
     curl \
     ffmpeg \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Install local CA certificates
+COPY certs/ /usr/local/share/ca-certificates/
+RUN update-ca-certificates
 
 WORKDIR /app
 
