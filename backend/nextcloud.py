@@ -5,7 +5,7 @@ import logging
 from datetime import date, timedelta, datetime, timezone
 
 import httpx
-from icalendar import Calendar, Event, Todo, vDatetime, vDate, vText
+from icalendar import Calendar, Event, Todo
 
 from .config import settings as app_settings_obj
 from . import database as db
@@ -162,7 +162,7 @@ def _build_vtodo(note: dict) -> str:
         todo.add("description", description)
     if note.get("reminder_at"):
         due_date = date.fromisoformat(note["reminder_at"][:10])
-        todo["DUE"] = vDate(due_date)
+        todo.add("due", due_date)
     status = "COMPLETED" if note.get("reminder_done") else "NEEDS-ACTION"
     todo.add("status", status)
     todo.add("last-modified", datetime.now(timezone.utc))
@@ -183,8 +183,8 @@ def _build_vevent(note: dict) -> str:
         event.add("description", description)
     if note.get("reminder_at"):
         due_date = date.fromisoformat(note["reminder_at"][:10])
-        event["DTSTART"] = vDate(due_date)
-        event["DTEND"] = vDate(due_date + timedelta(days=1))
+        event.add("dtstart", due_date)
+        event.add("dtend", due_date + timedelta(days=1))
     event.add("last-modified", datetime.now(timezone.utc))
     cal.add_component(event)
     return cal.to_ical().decode()
