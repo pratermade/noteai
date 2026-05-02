@@ -285,8 +285,14 @@ function renderMarkdown(content) {
 function renderPreview() {
   notePreview.innerHTML = renderMarkdown(contentArea.value);
   notePreview.querySelectorAll('a').forEach(a => {
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
+    const href = a.getAttribute('href') || '';
+    if (href.startsWith('#note/')) {
+      a.dataset.noteId = href.slice(6);
+      a.removeAttribute('href');
+    } else {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    }
   });
 }
 
@@ -516,6 +522,7 @@ function setEditMode(isEdit) {
     notePreview.style.display = 'none';
     contentArea.style.display = '';
     btnEditToggle.textContent = 'Preview';
+    autoGrow();
     contentArea.focus();
   } else {
     renderPreview();
@@ -582,6 +589,8 @@ async function openNote(id) {
     editorPanel.style.display = 'flex';
     editorPanel.style.flexDirection = 'column';
     noteListPanel.style.display = 'none';
+    fitEditorScrollBody();
+    autoGrow();
     closeSidebar();
     highlightActiveCard(id);
     if (!isList) await loadAttachments(id);
@@ -945,7 +954,7 @@ async function loadAttachments(noteId) {
   try {
     const atts = await apiFetch(`/api/notes/${noteId}/attachments`);
     renderAttachments(atts);
-    const hasPending = atts.some(a => !a.indexed_at);
+    const hasPending = atts.some(a => !a.indexed_at && !a.mime_type?.startsWith('image/'));
     if (hasPending) startAttPoll(noteId);
     else clearInterval(state.attPollTimer);
     state.attachmentSummaries = atts.filter(a => a.summary).map(a => ({ filename: a.filename, summary: a.summary }));
@@ -970,7 +979,7 @@ function renderAttRow(att) {
   const sizeStr = att.size_bytes ? formatBytes(att.size_bytes) : '';
   const pages   = att.page_count ? ` · ${att.page_count}p` : '';
   row.innerHTML = `
-    <span class="att-icon">${isWeb ? '🌐' : '📄'}</span>
+    <span class="att-icon">${isWeb ? '🌐' : att.mime_type?.startsWith('image/') ? '🖼' : att.mime_type?.startsWith('video/') ? '🎬' : '📄'}</span>
     <div class="att-info">
       <div class="att-name" title="${esc(att.filename)}">${esc(att.filename)}</div>
       <div class="att-meta">${sizeStr}${pages}</div>
@@ -988,6 +997,7 @@ function renderAttRow(att) {
 function attStatus(att) {
   if (att.extraction_error) return { cls: 'error', label: 'extraction failed' };
   if (att.indexed_at)   return { cls: 'indexed',    label: 'indexed' };
+  if (att.mime_type?.startsWith('image/')) return { cls: 'indexed', label: 'stored' };
   if (att.extracted_at) return { cls: 'indexing',   label: 'indexing…' };
   return { cls: 'extracting', label: 'extracting…' };
 }
@@ -1014,7 +1024,7 @@ function startAttPoll(noteId) {
 }
 
 async function downloadAtt(attId) {
-  window.location.href = `/api/attachments/${attId}/download`;
+  window.location.href = `/api/attachments/${attId}/download?token=${encodeURIComponent(_token || '')}`;
 }
 
 // ── Delete attachment (inline confirm) ────────────────────────────────────
@@ -1280,6 +1290,7 @@ $('btn-new-note').addEventListener('click', () => {
   editorPanel.style.display = 'flex';
   editorPanel.style.flexDirection = 'column';
   noteListPanel.style.display = 'none';
+  fitEditorScrollBody();
   closeSidebar();
   setEditMode(true);
   titleInput.focus();
@@ -1295,6 +1306,7 @@ $('btn-new-list').addEventListener('click', async () => {
   editorPanel.style.display = 'flex';
   editorPanel.style.flexDirection = 'column';
   noteListPanel.style.display = 'none';
+  fitEditorScrollBody();
 
   titleInput.value    = 'New List';
   contentArea.value   = '';
@@ -1344,7 +1356,14 @@ $('btn-tasks').addEventListener('click', openTasksPanel);
 $('btn-save').addEventListener('click', saveNote);
 $('btn-home').addEventListener('click', closeEditor);
 $('btn-refresh').addEventListener('click', loadNotes);
-notePreview.addEventListener('click', () => setEditMode(true));
+notePreview.addEventListener('click', e => {
+  const link = e.target.closest('a[data-note-id]');
+  if (link) {
+    openNote(link.dataset.noteId);
+    return;
+  }
+  setEditMode(true);
+});
 btnEditToggle.addEventListener('click', () => setEditMode(!state.editMode));
 
 document.addEventListener('keydown', e => {
@@ -1355,10 +1374,27 @@ document.addEventListener('keydown', e => {
   }
 });
 
+function fitEditorScrollBody() {
+  const scrollBody = $('editor-scroll-body');
+  const toolbar = $('editor-toolbar');
+  if (!scrollBody || !toolbar || editorPanel.style.display === 'none') return;
+  scrollBody.style.height = (window.innerHeight - toolbar.getBoundingClientRect().bottom) + 'px';
+}
+window.addEventListener('resize', fitEditorScrollBody);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', fitEditorScrollBody);
+}
+
+function autoGrow() {
+  contentArea.style.height = 'auto';
+  contentArea.style.height = contentArea.scrollHeight + 'px';
+}
+
 titleInput.addEventListener('input', () => { state.saveDirty = true; });
 folderInput.addEventListener('change', () => { state.saveDirty = true; });
 contentArea.addEventListener('input', () => {
   state.saveDirty = true;
+  autoGrow();
 });
 
 function updateReminderDoneBtn() {

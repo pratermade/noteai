@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from . import embeddings, vector_store
 from .chunker import chunk_text
 from .config import settings
+from .journal_log import journal_log_note
 from .models import FOLDERS
 
 logger = logging.getLogger(__name__)
@@ -128,7 +129,15 @@ async def _get_due_reminders(user_id: str | None = None) -> tuple[str, list[dict
         return "", []
 
 
+_char_prompt_cache: dict[str | None, tuple[str, float]] = {}
+_CHAR_CACHE_TTL = 300.0
+
+
 async def _get_character_prompt(user_id: str | None = None) -> str:
+    cached = _char_prompt_cache.get(user_id)
+    if cached and time.time() - cached[1] < _CHAR_CACHE_TTL:
+        return cached[0]
+    prompt = _DEFAULT_CHARACTER_PROMPT
     try:
         async with aiosqlite.connect(settings.database_url) as conn:
             if user_id:
@@ -143,10 +152,11 @@ async def _get_character_prompt(user_id: str | None = None) -> str:
                 ) as cur:
                     row = await cur.fetchone()
             if row and row[0].strip():
-                return row[0].strip()
+                prompt = row[0].strip()
     except Exception:
         pass
-    return _DEFAULT_CHARACTER_PROMPT
+    _char_prompt_cache[user_id] = (prompt, time.time())
+    return prompt
 
 
 def _format_reminders_md(reminders: list[dict]) -> str:
@@ -160,54 +170,25 @@ def _format_reminders_md(reminders: list[dict]) -> str:
     return "\n".join(lines)
 
 
-_CLASSIFY_SYSTEM = (
-    "You are a folder classifier. Given a user's query, return a JSON array of the most relevant "
-    "folder names from this exact list: " + ", ".join(FOLDERS) + ".\n\n"
-    "Return only folders clearly relevant to the query's intent. "
-    "Return [] if the query is general or spans many folders.\n\n"
-    "Examples:\n"
-    "- 'what should I work on / tasks / action items' → [\"Todo\"]\n"
-    "- 'how did I feel / past experiences / last week' → [\"Journal\"]\n"
-    "- 'how does X work / what is X / specs / facts' → [\"Reference\"]\n"
-    "- 'archived / old notes / past projects' → [\"Archive\"]\n"
-    "- General or cross-cutting questions → []\n\n"
-    "Respond with ONLY a valid JSON array, nothing else."
-)
+_FOLDER_KEYWORDS: dict[str, list[str]] = {
+    "Journal":   ["journal", "diary", "how did i feel", "yesterday", "last week", "today i"],
+    "Todo":      ["todo", "to-do", "task", "remind", "shopping", "grocery", "pick up"],
+    "Reference": ["how does", "what is", "spec", "reference", "definition", "how to"],
+}
 
 
-async def _classify_folders(query: str) -> list[str]:
-    """Ask the LLM which folders are relevant to this query. Returns [] on any error."""
-    try:
-        client = _get_llm_client()
-        payload = {
-            "model": _llm_model(),
-            "messages": [
-                {"role": "system", "content": _CLASSIFY_SYSTEM},
-                {"role": "user", "content": query},
-            ],
-            "max_tokens": 60,
-            "temperature": 0.0,
-        }
-        resp = await client.post(_llm_url(), json=payload, headers=_headers())
-        text = resp.json()["choices"][0]["message"]["content"].strip()
-        folders = json.loads(text)
-        if not isinstance(folders, list):
-            return []
-        valid = [f for f in folders if f in FOLDERS]
-        logger.info("Folder classification for query %r → %s", query[:60], valid)
-        return valid
-    except Exception:
-        logger.warning("Folder classification failed, using default filter", exc_info=True)
-        return []
+def _classify_folders_fast(query: str) -> list[str]:
+    q = query.lower()
+    return [folder for folder, kws in _FOLDER_KEYWORDS.items() if any(kw in q for kw in kws)]
 
 
-async def _retrieve_context(query: str, user_id: str | None = None) -> tuple[str, list[dict]]:
+async def _retrieve_context(
+    query: str, user_id: str | None = None, skip_classify: bool = False
+) -> tuple[str, list[dict]]:
     """Embed the query, search ChromaDB, return (context_string, numbered_sources)."""
     try:
-        emb_result, folders = await asyncio.gather(
-            embeddings.embed_texts([query]),
-            _classify_folders(query),
-        )
+        folders = [] if skip_classify else _classify_folders_fast(query)
+        emb_result = await embeddings.embed_texts([query])
         emb = emb_result[0]
 
         conditions: list[dict] = []
@@ -739,6 +720,7 @@ async def _tool_create_list(title: str, user_id: str, item_id: str | None = None
                     (item_uuid, note_id, item_id, now),
                 )
             await conn.commit()
+        asyncio.create_task(journal_log_note(note_id, title, "Lists", user_id))
         result = {"note_id": note_id, "title": title}
         if item_id:
             result["item_id"] = item_uuid  # type: ignore[assignment]
@@ -808,6 +790,7 @@ async def _tool_create_note(content: str | None, user_id: str) -> str:
             )
             await conn.commit()
         await _index_note_inline(note_id, title, content, user_id, "Unfiled")
+        asyncio.create_task(journal_log_note(note_id, title, "Unfiled", user_id))
         return json.dumps({"note_id": note_id, "title": title})
     except Exception as exc:
         logger.error("_tool_create_note failed: %s", exc, exc_info=True)
@@ -1347,10 +1330,58 @@ class ChatRequest(BaseModel):
     user_id: str | None = None
 
 
+def _instant_response(text: str, stream: bool):
+    msg_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    if stream:
+        async def _gen():
+            chunk = json.dumps({
+                "id": msg_id, "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+            })
+            yield f"data: {chunk}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+    return JSONResponse(content={
+        "id": msg_id, "object": "chat.completion",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+    })
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(body: ChatRequest):
     user_msgs = [m for m in body.messages if m.role == "user"]
     query = user_msgs[-1].content if user_msgs else ""
+
+    # Keyword shortcuts — bypass RAG/LLM for instant operations
+    query_stripped = query.strip()
+    lower = query_stripped.lower()
+    skip_classify = False
+    if lower.startswith("remember "):
+        content = query_stripped[len("remember "):].strip()
+        if content:
+            note_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+            title = _title_from_content(content)
+            try:
+                async with aiosqlite.connect(settings.database_url) as conn:
+                    await conn.execute("PRAGMA foreign_keys = ON")
+                    await conn.execute(
+                        "INSERT INTO notes (id, user_id, title, content, tags, folder, created_at, updated_at, note_type)"
+                        " VALUES (?,?,?,?,?,?,?,?,?)",
+                        (note_id, body.user_id, title, content, "[]", "Reference", now, now, "markdown"),
+                    )
+                    await conn.commit()
+                asyncio.create_task(
+                    _index_note_inline(note_id, title, content, body.user_id or "", "Reference")
+                )
+                asyncio.create_task(journal_log_note(note_id, title, "Reference", body.user_id or ""))
+                logger.info("remember: saved note %s for user=%s", note_id, body.user_id)
+            except Exception:
+                logger.warning("remember: note save failed", exc_info=True)
+            return _instant_response("Got it, I'll remember that.", body.stream)
+    elif lower.startswith("lookup "):
+        query = query_stripped[len("lookup "):].strip()
+        skip_classify = True
 
     async def _no_context():
         return "", []
@@ -1359,7 +1390,7 @@ async def chat_completions(body: ChatRequest):
         return "", []
 
     (context, sources), (reminders_text, reminders_list), character_prompt = await asyncio.gather(
-        _retrieve_context(query, body.user_id) if query else _no_context(),
+        _retrieve_context(query, body.user_id, skip_classify=skip_classify) if query else _no_context(),
         _no_reminders() if body.skip_reminders else _get_due_reminders(body.user_id),
         _get_character_prompt(body.user_id),
     )

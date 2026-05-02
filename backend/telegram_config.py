@@ -44,10 +44,6 @@ def _cfg(db_key: str, env_key: str, default: str = "") -> str:
 # ── Required settings ────────────────────────────────────────────────────────
 
 TELEGRAM_BOT_TOKEN: str = _cfg("telegram_bot_token", "TELEGRAM_BOT_TOKEN")
-if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError(
-        "TELEGRAM_BOT_TOKEN is not configured. Set it in .env or via the web UI Settings."
-    )
 
 _reminder_chat_raw = _cfg("telegram_reminder_chat_id", "TELEGRAM_REMINDER_CHAT_ID", "0")
 TELEGRAM_REMINDER_CHAT_ID: int = int(_reminder_chat_raw) if _reminder_chat_raw.strip() else 0
