@@ -284,9 +284,15 @@ function renderMarkdown(content) {
 
 function renderPreview() {
   notePreview.innerHTML = renderMarkdown(contentArea.value);
-  notePreview.querySelectorAll('a:not([href^="#note/"])').forEach(a => {
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
+  notePreview.querySelectorAll('a').forEach(a => {
+    const href = a.getAttribute('href') || '';
+    if (href.startsWith('#note/')) {
+      a.dataset.noteId = href.slice(6);
+      a.removeAttribute('href');
+    } else {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    }
   });
 }
 
@@ -1351,10 +1357,9 @@ $('btn-save').addEventListener('click', saveNote);
 $('btn-home').addEventListener('click', closeEditor);
 $('btn-refresh').addEventListener('click', loadNotes);
 notePreview.addEventListener('click', e => {
-  const link = e.target.closest('a[href^="#note/"]');
+  const link = e.target.closest('a[data-note-id]');
   if (link) {
-    e.preventDefault();
-    openNote(link.getAttribute('href').slice(6));
+    openNote(link.dataset.noteId);
     return;
   }
   setEditMode(true);

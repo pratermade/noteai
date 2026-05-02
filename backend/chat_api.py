@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from . import embeddings, vector_store
 from .chunker import chunk_text
 from .config import settings
+from .journal_log import journal_log_note
 from .models import FOLDERS
 
 logger = logging.getLogger(__name__)
@@ -719,6 +720,7 @@ async def _tool_create_list(title: str, user_id: str, item_id: str | None = None
                     (item_uuid, note_id, item_id, now),
                 )
             await conn.commit()
+        asyncio.create_task(journal_log_note(note_id, title, "Lists", user_id))
         result = {"note_id": note_id, "title": title}
         if item_id:
             result["item_id"] = item_uuid  # type: ignore[assignment]
@@ -788,6 +790,7 @@ async def _tool_create_note(content: str | None, user_id: str) -> str:
             )
             await conn.commit()
         await _index_note_inline(note_id, title, content, user_id, "Unfiled")
+        asyncio.create_task(journal_log_note(note_id, title, "Unfiled", user_id))
         return json.dumps({"note_id": note_id, "title": title})
     except Exception as exc:
         logger.error("_tool_create_note failed: %s", exc, exc_info=True)
@@ -1371,6 +1374,7 @@ async def chat_completions(body: ChatRequest):
                 asyncio.create_task(
                     _index_note_inline(note_id, title, content, body.user_id or "", "Reference")
                 )
+                asyncio.create_task(journal_log_note(note_id, title, "Reference", body.user_id or ""))
                 logger.info("remember: saved note %s for user=%s", note_id, body.user_id)
             except Exception:
                 logger.warning("remember: note save failed", exc_info=True)

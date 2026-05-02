@@ -825,6 +825,7 @@ body {
   text-decoration: underline;
   word-break: break-all;
 }
+#note-preview a[data-note-id] { cursor: pointer; }
 #note-preview a:hover { color: var(--accent-hover); }
 
 #note-preview strong { font-weight: 700; }
