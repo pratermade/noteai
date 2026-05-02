@@ -285,8 +285,16 @@ function renderMarkdown(content) {
 function renderPreview() {
   notePreview.innerHTML = renderMarkdown(contentArea.value);
   notePreview.querySelectorAll('a').forEach(a => {
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
+    const href = a.getAttribute('href') || '';
+    if (href.startsWith('#note:')) {
+      a.addEventListener('click', e => {
+        e.preventDefault();
+        openNote(href.slice(6));
+      });
+    } else {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    }
   });
 }
 
