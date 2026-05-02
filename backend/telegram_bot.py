@@ -26,12 +26,9 @@ from telegram.helpers import escape_markdown
 
 from .config import settings
 from .telegram_config import (
-    TELEGRAM_ALLOWED_USERS,
-    TELEGRAM_BOT_TOKEN,
     TELEGRAM_MAX_HISTORY,
     TELEGRAM_RAG_MODEL,
     TELEGRAM_RAG_URL,
-    TELEGRAM_REMINDER_CHAT_ID,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -41,9 +38,6 @@ _DEFAULT_CHARACTER_PROMPT = (
     "You are Alfred, a dry witty butler assistant. "
     "You are helpful but value the user's time, so you keep banter quick and dry."
 )
-
-# Held at module level so the GC never collects it.
-_scheduler: AsyncIOScheduler | None = None
 
 # chat_id -> list of {"role": "user"|"assistant", "content": str}
 conversations: dict[int, list[dict]] = {}
@@ -124,10 +118,27 @@ async def _get_notera_user_id_for_telegram(telegram_user_id: int) -> str | None:
     return None
 
 
+async def _get_allowed_users_for_bot(owner_user_id: str | None) -> set[int]:
+    """Return allowed Telegram user IDs for this bot's owner."""
+    if not owner_user_id:
+        return await _get_all_allowed_users()
+    val = await _get_user_setting(owner_user_id, "telegram_allowed_users", "")
+    result: set[int] = set()
+    for u in val.split(","):
+        u = u.strip()
+        if u:
+            try:
+                result.add(int(u))
+            except ValueError:
+                pass
+    return result
+
+
 def restricted(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        allowed = await _get_all_allowed_users()
+        owner_user_id = context.application.bot_data.get("owner_user_id")
+        allowed = await _get_allowed_users_for_bot(owner_user_id)
         if update.effective_user and update.effective_user.id not in allowed:
             await update.message.reply_text("Not authorized.")
             return
@@ -224,9 +235,11 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 @restricted
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    owner_user_id = context.application.bot_data.get("owner_user_id")
+    rag_url = await _get_user_setting(owner_user_id, "telegram_rag_url", TELEGRAM_RAG_URL) if owner_user_id else TELEGRAM_RAG_URL
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{TELEGRAM_RAG_URL}/v1/models")
+            r = await client.get(f"{rag_url}/v1/models")
             r.raise_for_status()
         await update.message.reply_text("NoterAI is online.")
     except Exception:
@@ -240,12 +253,13 @@ async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 @restricted
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.chat.send_action(ChatAction.TYPING)
+    owner_user_id = context.application.bot_data.get("owner_user_id")
     telegram_sender_id = update.effective_user.id if update.effective_user else None
     user_id = None
     if telegram_sender_id:
         user_id = await _get_notera_user_id_for_telegram(telegram_sender_id)
     if not user_id:
-        user_id = await _get_bot_user_id()
+        user_id = owner_user_id or await _get_bot_user_id()
     if user_id:
         await send_scheduled_reminder(context.bot, user_id)
 
@@ -254,13 +268,14 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user_text = update.message.text
+    owner_user_id = context.application.bot_data.get("owner_user_id")
 
     telegram_sender_id = update.effective_user.id if update.effective_user else None
     notera_user_id = None
     if telegram_sender_id:
         notera_user_id = await _get_notera_user_id_for_telegram(telegram_sender_id)
     if not notera_user_id:
-        notera_user_id = await _get_bot_user_id()
+        notera_user_id = owner_user_id or await _get_bot_user_id()
 
     history = conversations.setdefault(chat_id, [])
     history.append({"role": "user", "content": user_text})
@@ -277,8 +292,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     history.append({"role": "assistant", "content": response})
 
-    # Trim history to MAX_HISTORY user+assistant pairs
-    max_msgs = TELEGRAM_MAX_HISTORY * 2
+    max_history_raw = await _get_user_setting(notera_user_id or "", "telegram_max_history", str(TELEGRAM_MAX_HISTORY))
+    max_msgs = int(max_history_raw) * 2
     if len(history) > max_msgs:
         del history[: len(history) - max_msgs]
 
@@ -535,86 +550,74 @@ async def _check_and_send_journal_reminder(bot, user_id: str) -> None:
         logger.error("Journal reminder send failed: %s", exc)
 
 
-async def _reschedule_journal_reminders(bot) -> None:
-    """Rebuild per-user journal reminder cron jobs for all users."""
-    if _scheduler is None:
-        return
-    for job in _scheduler.get_jobs():
-        if job.id.startswith("journal_") and job.id != "journal_manager":
-            _scheduler.remove_job(job.id)
-
-    users = await _get_all_users_with_setting("journal_reminder_times")
-    for user_id, times_raw in users:
-        tz = await _get_timezone(user_id)
-        times = await _get_journal_reminder_times(user_id)
-        for h, m in times:
-            job_id = f"journal_{user_id[:8]}_{h:02d}{m:02d}"
-            _scheduler.add_job(
-                _check_and_send_journal_reminder,
-                CronTrigger(hour=h, minute=m, timezone=tz),
-                args=[bot, user_id],
-                id=job_id,
-                replace_existing=True,
-            )
-    logger.info("Journal reminders rescheduled for %d user(s)", len(users))
+async def _reschedule_reminders_for_user(bot, user_id: str, scheduler: AsyncIOScheduler) -> None:
+    prefix = f"reminder_{user_id[:8]}_"
+    for job in scheduler.get_jobs():
+        if job.id.startswith(prefix):
+            scheduler.remove_job(job.id)
+    tz = await _get_timezone(user_id)
+    times = await _get_reminder_times(user_id)
+    for h, m in times:
+        scheduler.add_job(
+            send_scheduled_reminder,
+            CronTrigger(hour=h, minute=m, timezone=tz),
+            args=[bot, user_id],
+            id=f"{prefix}{h:02d}{m:02d}",
+            replace_existing=True,
+        )
+    logger.info("Reminders rescheduled for user %s (%d jobs)", user_id, len(times))
 
 
-async def _reschedule_reminders(bot) -> None:
-    """Rebuild per-user reminder cron jobs for all users."""
-    if _scheduler is None:
-        return
-    for job in _scheduler.get_jobs():
-        if job.id.startswith("reminder_") and job.id != "reminder_manager":
-            _scheduler.remove_job(job.id)
-
-    users = await _get_all_users_with_setting("reminder_times")
-    for user_id, _ in users:
-        tz = await _get_timezone(user_id)
-        times = await _get_reminder_times(user_id)
-        for h, m in times:
-            job_id = f"reminder_{user_id[:8]}_{h:02d}{m:02d}"
-            _scheduler.add_job(
-                send_scheduled_reminder,
-                CronTrigger(hour=h, minute=m, timezone=tz),
-                args=[bot, user_id],
-                id=job_id,
-                replace_existing=True,
-            )
-    logger.info("Reminders rescheduled for %d user(s)", len(users))
+async def _reschedule_journal_for_user(bot, user_id: str, scheduler: AsyncIOScheduler) -> None:
+    prefix = f"journal_{user_id[:8]}_"
+    for job in scheduler.get_jobs():
+        if job.id.startswith(prefix):
+            scheduler.remove_job(job.id)
+    tz = await _get_timezone(user_id)
+    times = await _get_journal_reminder_times(user_id)
+    for h, m in times:
+        scheduler.add_job(
+            _check_and_send_journal_reminder,
+            CronTrigger(hour=h, minute=m, timezone=tz),
+            args=[bot, user_id],
+            id=f"{prefix}{h:02d}{m:02d}",
+            replace_existing=True,
+        )
+    logger.info("Journal reminders rescheduled for user %s (%d jobs)", user_id, len(times))
 
 
-async def post_init(application) -> None:
-    global _scheduler
-    _scheduler = AsyncIOScheduler()
-    bot_user_id = await _get_bot_user_id()
-    tz = await _get_timezone(bot_user_id)
-    _scheduler.add_job(
-        _reschedule_reminders,
-        CronTrigger(minute="0,30", timezone=tz),
-        args=[application.bot],
-        id="reminder_manager",
-        replace_existing=True,
-    )
-    _scheduler.add_job(
-        _reschedule_journal_reminders,
-        CronTrigger(minute="0,30", timezone=tz),
-        args=[application.bot],
-        id="journal_manager",
-        replace_existing=True,
-    )
-    _scheduler.start()
-    await _reschedule_reminders(application.bot)
-    await _reschedule_journal_reminders(application.bot)
-    logger.info("Reminder scheduler started (tz=%s)", tz)
+def make_post_init(owner_user_id: str):
+    async def _post_init(application) -> None:
+        scheduler = AsyncIOScheduler()
+        application.bot_data["owner_user_id"] = owner_user_id
+        application.bot_data["scheduler"] = scheduler
+        tz = await _get_timezone(owner_user_id)
+        scheduler.add_job(
+            _reschedule_reminders_for_user,
+            CronTrigger(minute="0,30", timezone=tz),
+            args=[application.bot, owner_user_id, scheduler],
+            id=f"reminder_manager_{owner_user_id[:8]}",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            _reschedule_journal_for_user,
+            CronTrigger(minute="0,30", timezone=tz),
+            args=[application.bot, owner_user_id, scheduler],
+            id=f"journal_manager_{owner_user_id[:8]}",
+            replace_existing=True,
+        )
+        scheduler.start()
+        await _reschedule_reminders_for_user(application.bot, owner_user_id, scheduler)
+        await _reschedule_journal_for_user(application.bot, owner_user_id, scheduler)
+        logger.info("Bot started for user %s (tz=%s)", owner_user_id, tz)
+    return _post_init
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-
+def _add_handlers(app) -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CommandHandler("status", status_command))
@@ -622,9 +625,32 @@ def main() -> None:
     app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Telegram bot started (long-polling)")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+async def _run_app(app) -> None:
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await asyncio.sleep(float("inf"))
+
+
+async def main() -> None:
+    tokens = await _get_all_users_with_setting("telegram_bot_token")
+    if not tokens:
+        logger.error("No telegram_bot_token found in user_settings. Configure via web UI Settings.")
+        return
+
+    apps = []
+    for owner_user_id, token in tokens:
+        app = ApplicationBuilder().token(token).post_init(make_post_init(owner_user_id)).build()
+        _add_handlers(app)
+        apps.append(app)
+        logger.info("Built bot for user %s", owner_user_id)
+
+    logger.info("Starting %d bot(s)", len(apps))
+    async with asyncio.TaskGroup() as tg:
+        for app in apps:
+            tg.create_task(_run_app(app))
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
