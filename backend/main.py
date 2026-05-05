@@ -1427,7 +1427,7 @@ async def test_task_reminder(conn: DB, current_user: CurrentUser):
     today = date.today().isoformat()
     async with conn.execute(
         "SELECT title, reminder_at FROM notes"
-        " WHERE user_id = ? AND reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+        " WHERE user_id = ? AND DATE(reminder_at) <= ? AND reminder_done = 0 ORDER BY reminder_at",
         (current_user["id"], today),
     ) as cur:
         rows = await cur.fetchall()
