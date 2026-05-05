@@ -104,14 +104,14 @@ async def _get_due_reminders(user_id: str | None = None) -> tuple[str, list[dict
             if user_id:
                 async with conn.execute(
                     "SELECT id, title, reminder_at FROM notes "
-                    "WHERE user_id = ? AND reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+                    "WHERE user_id = ? AND DATE(reminder_at) <= ? AND reminder_done = 0 ORDER BY reminder_at",
                     (user_id, today),
                 ) as cur:
                     rows = await cur.fetchall()
             else:
                 async with conn.execute(
                     "SELECT id, title, reminder_at FROM notes "
-                    "WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+                    "WHERE DATE(reminder_at) <= ? AND reminder_done = 0 ORDER BY reminder_at",
                     (today,),
                 ) as cur:
                     rows = await cur.fetchall()

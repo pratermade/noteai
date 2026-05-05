@@ -389,7 +389,7 @@ async def get_due_reminders(db: aiosqlite.Connection, today: str,
     if user_id:
         async with db.execute(
             "SELECT id, title, reminder_at FROM notes"
-            " WHERE user_id = ? AND reminder_at <= ? AND reminder_done = 0"
+            " WHERE user_id = ? AND DATE(reminder_at) <= ? AND reminder_done = 0"
             " ORDER BY reminder_at",
             (user_id, today),
         ) as cur:
@@ -397,7 +397,7 @@ async def get_due_reminders(db: aiosqlite.Connection, today: str,
     else:
         async with db.execute(
             "SELECT id, title, reminder_at FROM notes"
-            " WHERE reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+            " WHERE DATE(reminder_at) <= ? AND reminder_done = 0 ORDER BY reminder_at",
             (today,),
         ) as cur:
             rows = await cur.fetchall()

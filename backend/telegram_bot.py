@@ -322,7 +322,7 @@ async def send_scheduled_reminder(bot, user_id: str) -> None:
             conn.row_factory = aiosqlite.Row
             async with conn.execute(
                 "SELECT title, reminder_at FROM notes "
-                "WHERE user_id = ? AND reminder_at <= ? AND reminder_done = 0 ORDER BY reminder_at",
+                "WHERE user_id = ? AND DATE(reminder_at) <= ? AND reminder_done = 0 ORDER BY reminder_at",
                 (user_id, today),
             ) as cur:
                 rows = await cur.fetchall()
