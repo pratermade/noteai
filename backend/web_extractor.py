@@ -92,15 +92,20 @@ def _is_reddit_url(url: str) -> bool:
 
 
 def _extract_reddit_sync(url: str) -> WebExtractionResult:
+    import json as _json
     import re
-    import requests
+    import urllib.request
+
+    def _urlopen(target: str, method: str = "GET") -> urllib.request.Request:
+        req = urllib.request.Request(target, headers=_BROWSER_HEADERS, method=method)
+        return urllib.request.urlopen(req, timeout=30)
 
     # Resolve share links (/s/ format from mobile) to canonical /comments/ URL
     resolved = url
     if '/s/' in url:
         try:
-            head = requests.head(url, headers=_BROWSER_HEADERS, timeout=15, allow_redirects=True)
-            resolved = head.url
+            with _urlopen(url, method="HEAD") as resp:
+                resolved = resp.url
         except Exception as exc:
             raise ExtractionError(f"Could not resolve Reddit share URL: {exc}")
 
@@ -111,9 +116,8 @@ def _extract_reddit_sync(url: str) -> WebExtractionResult:
     json_url = f"https://www.reddit.com/comments/{m.group(1)}.json"
 
     try:
-        resp = requests.get(json_url, headers=_BROWSER_HEADERS, timeout=30, allow_redirects=True)
-        resp.raise_for_status()
-        data = resp.json()
+        with _urlopen(json_url) as resp:
+            data = _json.loads(resp.read())
     except Exception as exc:
         raise ExtractionError(f"Reddit JSON fetch failed: {exc}")
 

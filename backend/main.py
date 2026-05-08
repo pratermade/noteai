@@ -442,6 +442,7 @@ async def _web_pipeline(att_id: str, note_id: str, url: str, user_id: str = "") 
 
 async def _journal_pipeline(note_id: str, user_id: str = "") -> None:
     try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
@@ -450,7 +451,20 @@ async def _journal_pipeline(note_id: str, user_id: str = "") -> None:
                 return
             title = note.title
             if not title or title.lower() in ("untitled", "shared note"):
-                title = f"Journal — {datetime.now(timezone.utc).strftime('%B %-d, %Y')}"
+                tz = None
+                if user_id:
+                    async with conn.execute(
+                        "SELECT value FROM user_settings WHERE user_id = ? AND key = 'server_timezone'",
+                        (user_id,),
+                    ) as cur:
+                        tz_row = await cur.fetchone()
+                    tz_str = (tz_row[0].strip() if tz_row and tz_row[0] else "") or os.environ.get("TZ", "")
+                    try:
+                        tz = ZoneInfo(tz_str) if tz_str else None
+                    except ZoneInfoNotFoundError:
+                        pass
+                now = datetime.now(tz) if tz else datetime.now(timezone.utc)
+                title = f"Journal — {now.strftime('%B %-d, %Y')}"
             await db.update_note(conn, note_id, **{"title": title})
         await vector_store.delete_by_note_id(note_id)
         await _index_note(note_id, title, note.content, note.tags, "Journal", user_id=user_id)
