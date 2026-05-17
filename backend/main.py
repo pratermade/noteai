@@ -406,11 +406,15 @@ async def _pdf_pipeline(att_id: str, note_id: str, stored_path: str,
 async def _web_pipeline(att_id: str, note_id: str, url: str, user_id: str = "") -> None:
     try:
         result = await extract_url(url)
-        label = result.title or _hostname(url)
+        hostname = _hostname(url)
+        label = result.title or hostname
         summary = await _llm_summary(result.text)
         async with aiosqlite.connect(settings.database_url) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA foreign_keys = ON")
+            note = await db.get_note(conn, note_id)
+            if note and result.title and note.title == hostname:
+                await db.update_note(conn, note_id, title=result.title)
             await db.update_attachment(
                 conn, att_id,
                 filename=label,
