@@ -120,7 +120,7 @@ When a note is saved, the backend splits the content into overlapping token chun
 
 **PDF attachments** are extracted with PyMuPDF, chunked, and indexed with IDs in the form `{attachment_id}_c{chunk}`. Large PDFs are processed in batches of `INDEX_BATCH_SIZE` chunks so partial progress is saved to ChromaDB even if a batch fails.
 
-**URL attachments** (from the Android share target) are fetched with a browser User-Agent and extracted with trafilatura, then indexed as attachment chunks attributed back to the parent note. **Reddit URLs** (including mobile `/s/` share links) use Reddit's public JSON API instead of HTML scraping for reliable extraction.
+**URL attachments** (from the Android share target) are fetched with a browser User-Agent and extracted with trafilatura, then indexed as attachment chunks attributed back to the parent note. The extracted page title is automatically used as the note title (overriding the hostname default) when no explicit title was provided. **Reddit URLs** (including mobile `/s/` share links) use Reddit's public JSON API instead of HTML scraping for reliable extraction — the post title, body, and top 20 comments are all indexed.
 
 **Video notes** fetch the YouTube transcript via the `youtube-transcript-api` library, index it as chunks, and embed an inline YouTube player above the note content.
 
