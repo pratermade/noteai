@@ -623,6 +623,10 @@ def make_post_init(owner_user_id: str):
 # Entry point
 # ---------------------------------------------------------------------------
 
+async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("PTB unhandled error: %s", context.error, exc_info=context.error)
+
+
 def _add_handlers(app) -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("clear", clear_command))
@@ -630,6 +634,7 @@ def _add_handlers(app) -> None:
     app.add_handler(CommandHandler("chatid", chatid_command))
     app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(_error_handler)
 
 
 async def _run_app(app) -> None:

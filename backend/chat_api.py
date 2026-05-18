@@ -1405,6 +1405,8 @@ async def chat_completions(body: ChatRequest):
     messages = _build_messages([m.model_dump() for m in body.messages], context, reminders_text, character_prompt)
 
     payload: dict = {"model": _llm_model(), "messages": messages}
+    if not settings.chat_enable_thinking:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     if body.max_tokens is not None:
         payload["max_tokens"] = body.max_tokens
     if body.temperature is not None:

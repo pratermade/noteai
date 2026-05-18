@@ -66,7 +66,7 @@ On note update: delete old Chroma vectors by `note_id`, then re-index.
 On note delete: delete all Chroma vectors by `note_id`.
 
 ### PDF pipeline
-Background task after upload. Chroma IDs use `{attachment_id}_p{page}_c{chunk_index}`.
+Background task after upload. Chroma IDs use `{attachment_id}_c{chunk_index}`.
 Stored on disk as `{ATTACHMENT_DIR}/{note_id}/{attachment_id}.pdf` — never use original filename on disk.
 
 ### Web attachment pipeline
@@ -83,7 +83,7 @@ Written to disk at startup in the `lifespan` block (not a static file) so `APP_B
 
 ### ChromaDB IDs
 - Note chunks: `{note_id}_{chunk_index}`
-- PDF chunks: `{attachment_id}_p{page}_c{chunk_index}`
+- PDF chunks: `{attachment_id}_c{chunk_index}`
 - Both are idempotent on re-index
 
 ## Key Constraints
@@ -107,7 +107,7 @@ CHROMA_COLLECTION=notes
 EMBEDDING_BASE_URL=http://localhost:8080
 EMBEDDING_MODEL=nomic-embed-text
 EMBEDDING_BATCH_SIZE=32
-CHUNK_SIZE=512
+CHUNK_SIZE=350
 CHUNK_OVERLAP=64
 ATTACHMENT_DIR=./attachments
 APP_BASE_URL=https://localhost:8443

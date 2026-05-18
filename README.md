@@ -31,10 +31,10 @@ A self-hosted note-keeping PWA with automatic RAG pipeline. Notes, PDFs, and web
 
 ```bash
 cp .env.example .env   # configure settings
-docker compose up -d
+bash update.sh
 ```
 
-The app listens on `https://0.0.0.0:8443` by default (HTTPS required for Android PWA).
+`update.sh` builds the image, migrates any existing data volume, and starts the container. The app listens on `http://0.0.0.0:8889` by default (`APP_PORT` env var overrides). Set `APP_BASE_URL` in `.env` to your HTTPS address for Android PWA support.
 
 ## First-time setup: creating users
 
@@ -109,10 +109,18 @@ uvicorn backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem --host 0.
 | `CHAT_LLM_BASE_URL` | _(falls back to `SUMMARY_BASE_URL`)_ | LLM base URL for the RAG chat API |
 | `CHAT_LLM_MODEL` | _(falls back to `SUMMARY_MODEL`)_ | Model name for the RAG chat API |
 | `CHAT_N_RESULTS` | `8` | Note chunks injected as RAG context per chat request |
+| `CHAT_ENABLE_THINKING` | `true` | Set `false` to pass `chat_template_kwargs: {enable_thinking: false}` — disables chain-of-thought for models like Qwen3 |
 | `CHAT_PORT` | `8084` | Port for the RAG chat API service |
 | `WHISPER_BASE_URL` | `http://localhost:10300` | Wyoming faster-whisper TCP server address used for voice dictation |
 | `JWT_SECRET` | _(required)_ | Secret key for signing JWT auth tokens — generate with `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `JWT_EXPIRY_DAYS` | `30` | How many days a login token remains valid |
+| `TELEGRAM_BOT_TOKEN` | _(unset)_ | Bot token from @BotFather — bot only starts if set |
+| `TELEGRAM_ALLOWED_USERS` | _(unset)_ | Comma-separated Telegram user IDs allowed to use the bot |
+| `TELEGRAM_MAX_HISTORY` | `20` | Conversation turns kept per chat |
+| `TELEGRAM_RAG_URL` | `http://localhost:8084` | RAG chat API URL the bot queries |
+| `TELEGRAM_RAG_MODEL` | `noterai-rag` | Model name sent in RAG API requests |
+| `TELEGRAM_REMINDER_HOURS` | `8,14` | Comma-separated 24h hours for scheduled task reminders |
+| `TELEGRAM_REMINDER_CHAT_ID` | _(unset)_ | Chat ID where reminders are sent (use `/chatid` to find) |
 
 ## How the RAG pipeline works
 
