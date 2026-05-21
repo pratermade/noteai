@@ -25,13 +25,17 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 from .auth import CurrentUser, decode_token, get_current_user, hash_password, verify_password, create_token
 
 _bearer = HTTPBearer(auto_error=False)
 from .config import settings
 from . import database as db
-from . import embeddings, vector_store, wyoming_client
+from . import embeddings, vector_store
 from .chunker import chunk_text
+from .plugin_base import PluginContext
+from .plugin_loader import discover_plugins, register_all_plugins, shutdown_all_plugins
 from .models import (
     AttachmentResponse, ChangePasswordRequest, FOLDERS, ListItemCreate, ListItemResponse,
     ListItemUpdate, LoginRequest, NoteCreate, NoteResponse, NoteShareResponse, NoteUpdate,
@@ -52,8 +56,9 @@ logger = logging.getLogger(__name__)
 _pending_share: dict[str, dict] = {}  # token -> {note_id, expires_at}
 _reindex_jobs: dict[str, ReindexJob] = {}
 _latest_job_id: str | None = None
+_plugins: list = []  # populated in lifespan, used by /api/plugins/health
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend"
 ATTACHMENT_DIR = Path(settings.attachment_dir)
 
 _app_version = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
@@ -87,7 +92,7 @@ async def lifespan(app: FastAPI):
     ))
     logging.root.setLevel(logging.INFO)
     logging.root.handlers = [handler]
-    for mod in ("backend.main", "backend.embeddings", "backend.vector_store"):
+    for mod in ("backend.core.main", "backend.core.embeddings", "backend.core.vector_store"):
         logging.getLogger(mod).setLevel(logging.DEBUG)
 
     ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
@@ -142,8 +147,29 @@ async def lifespan(app: FastAPI):
 
     _nc_task = asyncio.create_task(_nc_scheduler_loop())
 
+    _scheduler = AsyncIOScheduler()
+    ctx = PluginContext(
+        app=app,
+        scheduler=_scheduler,
+        get_db=get_db,
+        settings=settings,
+        get_current_user=get_current_user,
+    )
+    global _plugins
+    _plugins = discover_plugins()
+    await register_all_plugins(_plugins, ctx)
+    _scheduler.start()
+
+    # Static mounts go last — after all plugin routes — so the "/" catch-all
+    # doesn't shadow plugin routes that were just registered above.
+    _plugins_frontend_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/frontend/plugins", StaticFiles(directory=str(_plugins_frontend_dir)), name="plugin-frontend")
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+
     yield
 
+    await shutdown_all_plugins(_plugins, ctx)
+    _scheduler.shutdown(wait=False)
     _nc_task.cancel()
     await embeddings.close_client()
     if _summary_client:
@@ -790,35 +816,6 @@ async def get_version():
 @app.get("/api/folders")
 async def list_folders(conn: DB, current_user: CurrentUser):
     return await db.list_folders(conn)
-
-
-@app.post("/api/journal/dictate", status_code=201)
-async def dictate_journal(
-    audio: UploadFile,
-    conn: DB,
-    background_tasks: BackgroundTasks,
-    current_user: CurrentUser,
-):
-    audio_bytes = await audio.read()
-    logger.info("dictate: received %d bytes, content_type=%s", len(audio_bytes), audio.content_type)
-    try:
-        from urllib.parse import urlparse
-        parsed = urlparse(settings.whisper_base_url)
-        host = parsed.hostname or "localhost"
-        port = parsed.port or 10300
-        logger.info("dictate: connecting to Wyoming at %s:%d", host, port)
-        transcript = (await wyoming_client.transcribe(audio_bytes, host, port)).strip()
-        logger.info("dictate: transcript=%r", transcript[:100] if transcript else "")
-    except Exception as exc:
-        logger.warning("dictate: failed — %s", exc)
-        raise HTTPException(status_code=502, detail=f"Whisper transcription failed: {exc}")
-
-    if not transcript:
-        raise HTTPException(status_code=422, detail="Transcription returned empty text")
-
-    note = await db.create_note(conn, current_user["id"], "Untitled", transcript, [], "Journal")
-    await _journal_pipeline(note.id, current_user["id"])
-    return {"id": note.id}
 
 
 # ---------------------------------------------------------------------------
@@ -1809,6 +1806,15 @@ async def health():
     return result
 
 
+@app.get("/api/plugins/health")
+async def plugins_health():
+    results = []
+    for p in _plugins:
+        h = await p.get_health()
+        results.append({"name": p.name, "version": p.version, **h})
+    return {"plugins": results}
+
+
 # ---------------------------------------------------------------------------
 # Dynamic routes — service_worker.js and manifest.json
 # (must be defined before the StaticFiles mount)
@@ -1868,7 +1874,8 @@ async def api_manifest(current_user: CurrentUser, conn: DB):
 
 
 # ---------------------------------------------------------------------------
-# Static frontend (must be last)
+# Static frontend — mounts registered inside lifespan (after plugins) so the
+# "/" catch-all doesn't shadow plugin routes added during startup.
 # ---------------------------------------------------------------------------
 
-app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+_plugins_frontend_dir = FRONTEND_DIR / "plugins"

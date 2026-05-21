@@ -24,14 +24,13 @@ from telegram.ext import (
 )
 from telegram.helpers import escape_markdown
 
-from .config import settings
-from .telegram_config import (
+from backend.core.config import settings
+from .config import (
     TELEGRAM_MAX_HISTORY,
     TELEGRAM_RAG_MODEL,
     TELEGRAM_RAG_URL,
 )
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CHARACTER_PROMPT = (
@@ -647,25 +646,33 @@ async def _run_app(app) -> None:
         await asyncio.sleep(float("inf"))
 
 
-async def main() -> None:
+async def start_all_bots() -> list[asyncio.Task]:
+    """
+    Start all configured Telegram bots as background asyncio tasks.
+    Returns the list of tasks so the caller can cancel them on shutdown.
+    """
     tokens = await _get_all_users_with_setting("telegram_bot_token")
     if not tokens:
-        logger.error("No telegram_bot_token found in user_settings. Configure via web UI Settings.")
-        return
+        logger.warning("No telegram_bot_token found in user_settings — Telegram bot not started")
+        return []
 
-    apps = []
+    tasks = []
     for owner_user_id, token in tokens:
         _bot_owner_map[token] = owner_user_id
         app = ApplicationBuilder().token(token).post_init(make_post_init(owner_user_id)).build()
         _add_handlers(app)
-        apps.append(app)
-        logger.info("Built bot for user %s token=%s", owner_user_id, token[:10])
+        task = asyncio.create_task(_run_app(app), name=f"telegram_bot_{owner_user_id[:8]}")
+        tasks.append(task)
+        logger.info("Started bot task for user %s token=%s", owner_user_id, token[:10])
 
-    logger.info("Starting %d bot(s)", len(apps))
-    async with asyncio.TaskGroup() as tg:
-        for app in apps:
-            tg.create_task(_run_app(app))
+    logger.info("Started %d Telegram bot task(s)", len(tasks))
+    return tasks
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Standalone mode preserved for direct invocation / debugging
+    async def _main():
+        tasks = await start_all_bots()
+        if tasks:
+            await asyncio.gather(*tasks)
+    asyncio.run(_main())

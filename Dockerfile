@@ -24,6 +24,7 @@ RUN python3 -c "import certifi; print(certifi.where())" | \
 
 # Copy application code
 COPY backend/ backend/
+COPY plugins/ plugins/
 COPY frontend/ frontend/
 
 # Runtime data lives in a mounted volume
