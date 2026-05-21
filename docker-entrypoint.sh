@@ -17,20 +17,11 @@ echo "ChromaDB ready."
 # Forward signals to children so the container stops cleanly
 trap "kill $CHROMA_PID $MAIN_PID" TERM INT
 
-# Start main app in background
-uvicorn backend.main:app \
+# Start main app (telegram bot + RAG chat are now plugins running inside this process)
+uvicorn backend.core.main:app \
     --host 0.0.0.0 \
     --port "${APP_PORT:-8889}" \
     --log-level info &
 MAIN_PID=$!
 
-# Always attempt to start the Telegram bot.
-# telegram_config.py will exit with a clear error if the token is missing from both DB and env.
-echo "Starting Telegram bot..."
-python -m backend.telegram_bot &
-
-# Start RAG chat API (exec so it receives signals directly)
-exec uvicorn backend.chat_api:app \
-    --host 0.0.0.0 \
-    --port "${CHAT_PORT:-8084}" \
-    --log-level info
+wait $MAIN_PID

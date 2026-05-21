@@ -7,21 +7,20 @@ import os
 import re
 import time
 import uuid
-from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 
 import aiosqlite
 import httpx
-from fastapi import FastAPI
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import embeddings, vector_store
-from .chunker import chunk_text
-from .config import settings
-from .journal_log import journal_log_note
-from .models import FOLDERS
-from . import nextcloud as nc
+from backend.core import embeddings, vector_store
+from backend.core.chunker import chunk_text
+from backend.core.config import settings
+from backend.core.journal_log import journal_log_note
+from backend.core.models import FOLDERS
+from backend.core import nextcloud as nc
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +50,7 @@ async def close_llm_client() -> None:
         _llm_client = None
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    yield
-    await close_llm_client()
-    await embeddings.close_client()
-
-
-app = FastAPI(title="NoterAI RAG Chat", lifespan=lifespan)
+router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
@@ -1296,7 +1288,7 @@ def _build_messages(original: list[dict], context: str, reminders: str = "", cha
 # Models
 # ---------------------------------------------------------------------------
 
-@app.get("/v1/models")
+@router.get("/v1/models")
 async def list_models():
     return {
         "object": "list",
@@ -1348,7 +1340,7 @@ def _instant_response(text: str, stream: bool):
     })
 
 
-@app.post("/v1/chat/completions")
+@router.post("/v1/chat/completions")
 async def chat_completions(body: ChatRequest):
     user_msgs = [m for m in body.messages if m.role == "user"]
     query = user_msgs[-1].content if user_msgs else ""
@@ -1405,6 +1397,8 @@ async def chat_completions(body: ChatRequest):
     messages = _build_messages([m.model_dump() for m in body.messages], context, reminders_text, character_prompt)
 
     payload: dict = {"model": _llm_model(), "messages": messages}
+    if not settings.chat_enable_thinking:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     if body.max_tokens is not None:
         payload["max_tokens"] = body.max_tokens
     if body.temperature is not None:

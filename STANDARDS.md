@@ -296,3 +296,18 @@ Defined as CSS variables in `:root` — always use variables, never hardcode hex
 | `--shadow` | `0 1px 3px rgba(0,0,0,.1)` | Card and panel shadows |
 
 Never introduce a new color. If a new semantic color is genuinely needed, add it as a CSS variable here first.
+
+---
+
+## Plugin Standards
+
+- Plugin name (slug): lowercase, underscores only — no hyphens (e.g. `chat_rag`, not `chat-rag`)
+- `user_settings` keys owned by a plugin must be prefixed with the plugin name
+- Plugins must not import from each other
+- Plugins may import from `backend.core.*` freely; use absolute imports
+- New DB tables created by a plugin: `CREATE TABLE IF NOT EXISTS` only, named `{plugin_name}_{table}`, created in `register()`
+- Route prefix: `/api/{plugin_name}/` unless there's a strong compatibility reason not to (chat_rag uses `/v1/` for OpenAI compat — document why in `plugin.py`)
+- Frontend: each plugin's `settings.js` must export an `init()` function; called after the fragment is injected
+- `register()` must complete in under 2 seconds; defer heavy init to `asyncio.create_task()`
+- Plugins must catch all exceptions internally — never let an exception propagate out of `register()` or scheduler job functions
+- `shutdown()` must cancel all background tasks and close any open connections

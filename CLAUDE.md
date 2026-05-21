@@ -13,10 +13,10 @@ Self-hosted note-keeping web app with automatic RAG pipeline. Notes are chunked,
 chroma run --path ./chroma_data
 
 # Start the app
-uvicorn backend.main:app --reload
+uvicorn backend.core.main:app --reload
 
 # Start with HTTPS (required for Android PWA)
-uvicorn backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem --port 8443
+uvicorn backend.core.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem --port 8443
 ```
 
 ## Stack
@@ -30,23 +30,49 @@ uvicorn backend.main:app --ssl-keyfile key.pem --ssl-certfile cert.pem --port 84
 
 ```
 backend/
-  main.py          # FastAPI app, lifespan, route registration
-  config.py        # Settings from .env
-  database.py      # SQLite CRUD (aiosqlite)
-  embeddings.py    # httpx async embedding client with tenacity retry
-  vector_store.py  # ChromaDB AsyncHttpClient wrapper
-  chunker.py       # tiktoken-based paragraph/sentence chunker
-  pdf_extractor.py # PyMuPDF text extraction (run in executor)
-  web_extractor.py # trafilatura URL extraction (run in executor)
-  models.py        # Pydantic models
-attachments/       # PDF files on disk — git-ignored
+  core/
+    main.py          # FastAPI app, lifespan, plugin loader, route registration
+    config.py        # Settings from .env
+    database.py      # SQLite CRUD (aiosqlite)
+    embeddings.py    # httpx async embedding client with tenacity retry
+    vector_store.py  # ChromaDB AsyncHttpClient wrapper
+    chunker.py       # tiktoken-based paragraph/sentence chunker
+    pdf_extractor.py # PyMuPDF text extraction (run in executor)
+    web_extractor.py # trafilatura URL extraction (run in executor)
+    models.py        # Pydantic models
+    plugin_base.py   # PluginContext dataclass + NotePlugin ABC
+    plugin_loader.py # discover_plugins(), register_all_plugins(), shutdown_all_plugins()
+plugins/             # Plugin packages — discovered at startup
+  chat_rag/          # OpenAI-compatible RAG chat completions (/v1/chat/completions)
+  voice/             # Wyoming/Whisper voice transcription (/api/journal/dictate)
+  telegram/          # Telegram bot with scheduled reminders
+attachments/         # PDF files on disk — git-ignored
 frontend/
   index.html / app.js / style.css
   share.html / share.js   # Post-share redirect handler
-  manifest.json           # Written at startup (not static) — embeds APP_BASE_URL
   service_worker.js       # Minimal pass-through SW for PWA installability
   icons/                  # icon-192.png, icon-512.png
+  plugins/                # Plugin frontend fragments (served as /frontend/plugins/)
+    telegram/
+      settings.html       # Injected into settings modal at runtime
+      settings.js         # ES module; exports init() called after injection
 ```
+
+## Plugin System
+
+Plugins live in `plugins/{name}/`. Each exports a `plugin` NotePlugin instance from its `__init__.py`. The loader discovers all plugins at startup and calls `plugin.register(ctx)` with a `PluginContext` giving access to the FastAPI app, APScheduler instance, DB dependency, settings, and auth dependency. Plugins mount their own routes via `ctx.app.include_router()`. Plugin registration errors are logged and skipped — they never crash the main app.
+
+Rules for new plugins:
+- Plugin name (slug): lowercase, underscores, no hyphens (e.g. `chat_rag`)
+- `user_settings` keys must be prefixed with the plugin name
+- Plugins must not import from each other
+- Plugins may import from `backend.core.*` freely
+- New DB tables: `CREATE TABLE IF NOT EXISTS` only, named `{plugin_name}_{table}`, created in `register()`
+- Route prefix: `/api/{plugin_name}/` unless there's a strong compatibility reason (chat_rag uses `/v1/` for OpenAI compat)
+- Frontend fragments: `frontend/plugins/{name}/settings.html` + `settings.js` exporting `init()`
+- Plugin registration must complete in under 2 seconds; defer heavy work to background tasks
+
+**Note on `telegram_rag_url`**: After migration from separate process to plugin, the chat API runs on the main app port (default 8889). Users who configured `telegram_rag_url` pointing to the old `CHAT_PORT` (8084) should update it to the main app URL.
 
 ## Architecture Notes
 
@@ -66,7 +92,7 @@ On note update: delete old Chroma vectors by `note_id`, then re-index.
 On note delete: delete all Chroma vectors by `note_id`.
 
 ### PDF pipeline
-Background task after upload. Chroma IDs use `{attachment_id}_p{page}_c{chunk_index}`.
+Background task after upload. Chroma IDs use `{attachment_id}_c{chunk_index}`.
 Stored on disk as `{ATTACHMENT_DIR}/{note_id}/{attachment_id}.pdf` — never use original filename on disk.
 
 ### Web attachment pipeline
@@ -83,7 +109,7 @@ Written to disk at startup in the `lifespan` block (not a static file) so `APP_B
 
 ### ChromaDB IDs
 - Note chunks: `{note_id}_{chunk_index}`
-- PDF chunks: `{attachment_id}_p{page}_c{chunk_index}`
+- PDF chunks: `{attachment_id}_c{chunk_index}`
 - Both are idempotent on re-index
 
 ## Key Constraints
@@ -107,7 +133,7 @@ CHROMA_COLLECTION=notes
 EMBEDDING_BASE_URL=http://localhost:8080
 EMBEDDING_MODEL=nomic-embed-text
 EMBEDDING_BATCH_SIZE=32
-CHUNK_SIZE=512
+CHUNK_SIZE=350
 CHUNK_OVERLAP=64
 ATTACHMENT_DIR=./attachments
 APP_BASE_URL=https://localhost:8443

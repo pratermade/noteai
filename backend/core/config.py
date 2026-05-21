@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     tool_router_model: str = "qwen3-tool-router"
     tool_router_context_messages: int = 6     # last N non-system messages sent to router
     tool_router_log: str = ""                 # JSONL log path; e.g. /data/tool_router_log.jsonl
+    chat_enable_thinking: bool = True   # set False to pass chat_template_kwargs={enable_thinking:false}
     whisper_base_url: str = "http://localhost:10300"
     jwt_secret: str = ""
     jwt_expiry_days: int = 30

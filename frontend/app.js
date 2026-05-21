@@ -1532,13 +1532,15 @@ async function loadSettings() {
     ]);
     renderReminderTimes(data.reminder_times);
     renderJournalReminderTimes(data.journal_reminder_times || []);
-    $('tg-bot-token').value         = data.telegram_bot_token || '';
-    $('tg-allowed-users').value     = (data.telegram_allowed_users || []).join(', ');
-    $('tg-reminder-chat-id').value  = data.telegram_reminder_chat_id || '';
-    $('tg-rag-url').value           = data.telegram_rag_url || '';
-    $('tg-rag-model').value         = data.telegram_rag_model || '';
-    $('tg-max-history').value       = data.telegram_max_history || '';
-    $('tg-my-user-id').value        = data.telegram_user_id || '';
+    // tg-* elements are in the telegram plugin fragment — guard against null
+    const _s = (id, val) => { const el = $(id); if (el) el.value = val; };
+    _s('tg-bot-token',       data.telegram_bot_token || '');
+    _s('tg-allowed-users',   (data.telegram_allowed_users || []).join(', '));
+    _s('tg-reminder-chat-id', data.telegram_reminder_chat_id || '');
+    _s('tg-rag-url',         data.telegram_rag_url || '');
+    _s('tg-rag-model',       data.telegram_rag_model || '');
+    _s('tg-max-history',     data.telegram_max_history || '');
+    _s('tg-my-user-id',      data.telegram_user_id || '');
     $('character-prompt').value     = data.character_prompt || '';
     $('server-timezone').value      = data.server_timezone || '';
     $('nc-url').value               = data.nextcloud_url || '';
@@ -1549,9 +1551,11 @@ async function loadSettings() {
     $('nc-lookahead-days').value    = data.nextcloud_rag_lookahead_days || '';
     $('nc-sync-interval').value     = data.nextcloud_sync_interval_minutes || '';
     const botUserSel = $('tg-bot-user');
-    botUserSel.innerHTML = users.map(u =>
-      `<option value="${u.id}"${u.id === data.telegram_bot_user_id ? ' selected' : ''}>${u.username}</option>`
-    ).join('');
+    if (botUserSel) {
+      botUserSel.innerHTML = users.map(u =>
+        `<option value="${u.id}"${u.id === data.telegram_bot_user_id ? ' selected' : ''}>${u.username}</option>`
+      ).join('');
+    }
     _loadedTgCredentials = {
       tz:      data.server_timezone || '',
       token:   data.telegram_bot_token || '',
@@ -1580,28 +1584,30 @@ $('btn-settings-save').addEventListener('click', async () => {
   const journalInputs = journalReminderList.querySelectorAll('input[type=time]');
   const journalTimes = [...journalInputs].map(i => i.value).filter(Boolean);
 
-  const allowedRaw = $('tg-allowed-users').value;
+  // tg-* elements are in the telegram plugin fragment — guard against null
+  const _gv = id => { const el = $(id); return el ? el.value : ''; };
+  const allowedRaw = _gv('tg-allowed-users');
   const allowed = allowedRaw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
 
-  const chatIdRaw = $('tg-reminder-chat-id').value.trim();
+  const chatIdRaw = _gv('tg-reminder-chat-id').trim();
   const chatId = chatIdRaw ? parseInt(chatIdRaw, 10) : 0;
 
-  const maxHistRaw = $('tg-max-history').value.trim();
+  const maxHistRaw = _gv('tg-max-history').trim();
   const maxHist = maxHistRaw ? parseInt(maxHistRaw, 10) : 20;
 
   const payload = {
     server_timezone: $('server-timezone').value.trim() || undefined,
     reminder_times: times,
     journal_reminder_times: journalTimes,
-    telegram_bot_token: $('tg-bot-token').value.trim() || undefined,
+    telegram_bot_token: _gv('tg-bot-token').trim() || undefined,
     telegram_allowed_users: allowed,
     telegram_reminder_chat_id: chatId || undefined,
-    telegram_rag_url: $('tg-rag-url').value.trim() || undefined,
-    telegram_rag_model: $('tg-rag-model').value.trim() || undefined,
+    telegram_rag_url: _gv('tg-rag-url').trim() || undefined,
+    telegram_rag_model: _gv('tg-rag-model').trim() || undefined,
     telegram_max_history: maxHist || undefined,
     character_prompt: $('character-prompt').value.trim() || undefined,
-    telegram_bot_user_id: $('tg-bot-user').value || undefined,
-    telegram_user_id: $('tg-my-user-id').value.trim() || undefined,
+    telegram_bot_user_id: _gv('tg-bot-user') || undefined,
+    telegram_user_id: _gv('tg-my-user-id').trim() || undefined,
     nextcloud_url: $('nc-url').value.trim() || undefined,
     nextcloud_username: $('nc-username').value.trim() || undefined,
     nextcloud_app_password: $('nc-app-password').value.trim() || undefined,
@@ -1622,26 +1628,26 @@ $('btn-settings-save').addEventListener('click', async () => {
     renderReminderTimes(data.reminder_times);
     renderJournalReminderTimes(data.journal_reminder_times || []);
     const credChanged =
-      $('server-timezone').value.trim()    !== _loadedTgCredentials.tz      ||
-      $('tg-bot-token').value.trim()       !== _loadedTgCredentials.token   ||
-      $('tg-allowed-users').value.trim()   !== _loadedTgCredentials.users   ||
-      $('tg-reminder-chat-id').value.trim()!== _loadedTgCredentials.chatId  ||
-      $('tg-rag-url').value.trim()         !== _loadedTgCredentials.ragUrl  ||
-      $('tg-rag-model').value.trim()       !== _loadedTgCredentials.ragModel ||
-      $('tg-max-history').value.trim()     !== _loadedTgCredentials.maxHist;
+      $('server-timezone').value.trim()  !== _loadedTgCredentials.tz      ||
+      _gv('tg-bot-token').trim()         !== _loadedTgCredentials.token   ||
+      _gv('tg-allowed-users').trim()     !== _loadedTgCredentials.users   ||
+      _gv('tg-reminder-chat-id').trim()  !== _loadedTgCredentials.chatId  ||
+      _gv('tg-rag-url').trim()           !== _loadedTgCredentials.ragUrl  ||
+      _gv('tg-rag-model').trim()         !== _loadedTgCredentials.ragModel ||
+      _gv('tg-max-history').trim()       !== _loadedTgCredentials.maxHist;
     const msg = credChanged
-      ? 'Settings saved. Restart the Telegram bot container for credential changes to take effect.'
+      ? 'Settings saved. Telegram bot will pick up changes on next restart.'
       : 'Settings saved. Reminder schedules update automatically within 30 minutes.';
     toast(msg, 'success');
     // Update snapshot so subsequent saves compare against new values
     _loadedTgCredentials = {
       tz:       $('server-timezone').value.trim(),
-      token:    $('tg-bot-token').value.trim(),
-      users:    $('tg-allowed-users').value.trim(),
-      chatId:   $('tg-reminder-chat-id').value.trim(),
-      ragUrl:   $('tg-rag-url').value.trim(),
-      ragModel: $('tg-rag-model').value.trim(),
-      maxHist:  $('tg-max-history').value.trim(),
+      token:    _gv('tg-bot-token').trim(),
+      users:    _gv('tg-allowed-users').trim(),
+      chatId:   _gv('tg-reminder-chat-id').trim(),
+      ragUrl:   _gv('tg-rag-url').trim(),
+      ragModel: _gv('tg-rag-model').trim(),
+      maxHist:  _gv('tg-max-history').trim(),
     };
   } catch (e) {
     toast('Save failed: ' + e.message, 'error');
@@ -1696,20 +1702,7 @@ $('btn-test-nextcloud').addEventListener('click', async () => {
   }
 });
 
-$('btn-test-telegram').addEventListener('click', async () => {
-  const btn = $('btn-test-telegram');
-  btn.disabled = true;
-  btn.textContent = 'Testing…';
-  try {
-    await apiFetch('/api/settings/test-telegram', { method: 'POST' });
-    toast('Telegram connected! Check your chat for the test message.', 'success');
-  } catch (e) {
-    toast('Test failed: ' + e.message, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Test Connection';
-  }
-});
+// btn-test-telegram is registered by plugins/telegram/settings.js init()
 
 $('btn-test-task-reminder').addEventListener('click', async () => {
   const btn = $('btn-test-task-reminder');
@@ -1747,6 +1740,30 @@ $('btn-settings').addEventListener('click', () => {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 
+async function loadPluginSettingsSections() {
+  const container = $('plugin-settings-container');
+  if (!container) return;
+  let plugins = [];
+  try {
+    const data = await apiFetch('/api/plugins/health');
+    plugins = data.plugins || [];
+  } catch (e) {
+    console.warn('loadPluginSettingsSections: could not fetch plugin list', e);
+    return;
+  }
+  for (const p of plugins) {
+    try {
+      const resp = await fetch(`/frontend/plugins/${p.name}/settings.html`);
+      if (!resp.ok) continue;
+      container.insertAdjacentHTML('beforeend', await resp.text());
+      const mod = await import(`/frontend/plugins/${p.name}/settings.js`);
+      if (mod.init) mod.init();
+    } catch (e) {
+      console.warn(`plugin frontend load failed: ${p.name}`, e);
+    }
+  }
+}
+
 async function init() {
   try {
     const me = await apiFetch('/api/auth/me');
@@ -1757,6 +1774,7 @@ async function init() {
   await loadNotes();
   startNoteListPoll();
   await loadSidebar();
+  await loadPluginSettingsSections();
   await loadSettings();
   apiFetch('/api/version').then(d => {
     const el = $('build-number');
